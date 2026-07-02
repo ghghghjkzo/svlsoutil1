@@ -310,24 +310,57 @@ else:
                         sources=selected_sources,
                         max_pages=max_pages,
                     )
-            merged = live_search.dedupe_listings(collected)
-            st.session_state.live_results = live_search.filter_complete(merged) if only_complete else merged
-            st.session_state.live_results_raw_count = len(merged)
-        if not st.session_state.live_results:
-            st.error(
-                "Aucune donnée exploitable extraite. Causes possibles : (1) les sites rendent "
-                "leurs annonces en JavaScript (requests seul ne suffit pas, il faudrait "
-                "Playwright/Selenium), (2) le filtre 'annonces complètes' a tout écarté — "
-                "décoche-le pour voir les résultats partiels, (3) aucune annonce ne correspond "
-                "aux critères sur cette zone."
-            )
+
+        # ── diagnostic précis ────────────────────────────────────────────
+        merged = live_search.dedupe_listings(collected)
+        n_brut        = len(merged)
+        n_avec_prix   = sum(1 for x in merged
+                            if to_num(x.get("Loyer_facial_eur_m2_an"))
+                            or to_num(x.get("Prix_vente_eur_m2")))
+        n_avec_addr   = sum(1 for x in merged if x.get("Adresse_precise"))
+        n_complets    = sum(1 for x in merged if x.get("Complete"))
+        filtered      = live_search.filter_complete(merged) if only_complete else merged
+
+        # stockage
+        st.session_state.live_results = filtered
+        st.session_state.live_diag = {
+            "brut": n_brut, "prix": n_avec_prix,
+            "addr": n_avec_addr, "complets": n_complets,
+            "filtres": len(filtered), "only_complete": only_complete,
+        }
+
+        if not filtered:
+            diag = st.session_state.live_diag
+            st.error("❌ Aucun comparable retenu — voici pourquoi :")
+            st.markdown(f"""
+| Étape | Résultat |
+|---|---|
+| Annonces brutes scrappées | **{diag['brut']}** |
+| Dont avec un prix extrait | **{diag['prix']}** |
+| Dont avec adresse précise | **{diag['addr']}** |
+| Dont complètes (adresse + prix) | **{diag['complets']}** |
+| Après filtre « complètes seulement » | **{diag['filtres']}** |
+""")
+            if diag["brut"] == 0:
+                st.warning("**Cause probable : JavaScript.** Le site charge ses annonces après "
+                            "coup via JS — requests ne peut pas les lire. "
+                            "Décoche toutes les sources sauf BureauxLocaux et réessaie.")
+            elif diag["prix"] == 0:
+                st.warning("**Cause probable : format de prix non reconnu.** "
+                            "Des annonces ont été trouvées mais aucun prix n'a été extrait. "
+                            "Décoche « annonces complètes » pour les voir quand même.")
+            elif diag["complets"] == 0 and only_complete:
+                st.warning("**Filtre trop strict.** Des annonces ont été trouvées "
+                            f"({diag['prix']} avec prix, {diag['addr']} avec adresse) mais "
+                            f"aucune n'a les deux. **Décoche « Ne garder que les annonces "
+                            f"complètes »** pour les inclure quand même.")
             st.stop()
         else:
-            n_raw = st.session_state.get("live_results_raw_count", len(st.session_state.live_results))
-            msg = f"{len(st.session_state.live_results)} annonce(s) retenue(s) sur {search_commune}"
-            if only_complete and n_raw > len(st.session_state.live_results):
-                msg += f" ({n_raw - len(st.session_state.live_results)} écartée(s) car incomplètes)"
-            st.success(msg + ".")
+            n_raw = len(merged)
+            msg = f"✅ {len(filtered)} annonce(s) retenue(s) sur {search_commune}"
+            if only_complete and n_raw > len(filtered):
+                msg += f" ({n_raw - len(filtered)} écartée(s) — adresse ou prix manquant)"
+            st.success(msg)
     if not st.session_state.live_results:
         st.info("Lance la recherche en direct dans la barre latérale.")
         st.stop()
