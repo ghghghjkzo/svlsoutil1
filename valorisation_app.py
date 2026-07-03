@@ -31,6 +31,7 @@ from openpyxl.utils import get_column_letter
 import live_search
 import apis
 import auth
+import dossiers
 
 st.set_page_config(page_title="Valorisation — Savills", page_icon="🏢", layout="wide")
 
@@ -876,10 +877,105 @@ def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comp
 
 auth.render_user_badge()
 
+# ══════════════════════════════════════════════════════════════════════════
+# PHASE 2 — Gate dossier : l'utilisateur doit ouvrir ou créer un dossier
+# ══════════════════════════════════════════════════════════════════════════
+user = auth.current_user()
+
+if "active_dossier_id" not in st.session_state:
+    st.session_state.active_dossier_id = None
+
+if st.session_state.active_dossier_id is None:
+    st.markdown(
+        "<div style='max-width:640px;margin:20px auto'>"
+        "<h2 style='color:#25273A'>📁 Mes dossiers</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+    existing = dossiers.list_dossiers(user["id"]) if user else []
+
+    col_new, col_list = st.columns([1, 2])
+    with col_new:
+        st.markdown("#### ➕ Nouveau dossier")
+        with st.form("new_dossier_form"):
+            nc = st.text_input("Nom du client / dossier", placeholder="ex. Actif Rue de la Tour")
+            adr = st.text_input("Adresse (optionnel, éditable ensuite)", placeholder="ex. Nantes")
+            tb = st.selectbox("Type de bien", ["Bureaux", "Activités", "Commerce", "Mixte"])
+            create = st.form_submit_button("Créer le dossier", use_container_width=True)
+        if create:
+            new_d = dossiers.create_dossier(user["id"], nc, adr, tb)
+            if new_d:
+                st.session_state.active_dossier_id = new_d["id"]
+                st.session_state.active_dossier_meta = new_d
+                st.rerun()
+            else:
+                st.error("Échec de création — vérifie la connexion à la base de données.")
+
+    with col_list:
+        st.markdown("#### 📂 Dossiers existants")
+        if not existing:
+            st.caption("Aucun dossier pour l'instant. Crée ton premier dossier à gauche.")
+        else:
+            for d in existing:
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    with c1:
+                        st.markdown(f"**{d.get('nom_client', 'Sans nom')}**")
+                        st.caption(f"{d.get('adresse','—') or '—'} · {d.get('type_bien','—')} · "
+                                   f"{d.get('statut','brouillon')}")
+                        upd = d.get("updated_at", "")
+                        if upd:
+                            st.caption(f"Modifié le {upd[:10]} à {upd[11:16]}")
+                    with c2:
+                        if st.button("Ouvrir", key=f"open_{d['id']}", use_container_width=True):
+                            st.session_state.active_dossier_id = d["id"]
+                            st.session_state.active_dossier_meta = d
+                            st.rerun()
+                    with c3:
+                        if st.button("🗑️", key=f"del_{d['id']}", use_container_width=True):
+                            dossiers.delete_dossier(d["id"])
+                            st.rerun()
+    st.stop()
+
+# ── Dossier actif : chargement du contenu sauvegardé (une seule fois) ──────
+if "dossier_loaded" not in st.session_state:
+    full = dossiers.load_dossier(st.session_state.active_dossier_id)
+    if full:
+        st.session_state.active_dossier_meta = full
+        dossiers.restore_session_state(full.get("data") or {}, st.session_state)
+    st.session_state.dossier_loaded = True
+
+# ── Bandeau dossier actif (en haut, au-dessus de tout le reste) ────────────
+_meta = st.session_state.get("active_dossier_meta", {})
+_bcol1, _bcol2, _bcol3 = st.columns([5, 1, 1])
+with _bcol1:
+    st.markdown(
+        f"<div style='background:#FFF9E5;border-left:3px solid #FFDF00;"
+        f"padding:8px 14px;border-radius:6px;font-size:13px;color:#25273A'>"
+        f"📁 Dossier actif : <b>{_meta.get('nom_client','Sans nom')}</b> — "
+        f"{_meta.get('adresse','—') or '—'}</div>",
+        unsafe_allow_html=True,
+    )
+with _bcol2:
+    if st.button("💾 Sauvegarder", use_container_width=True):
+        ok = dossiers.save_dossier_data(
+            st.session_state.active_dossier_id,
+            dossiers.snapshot_session_state(st.session_state),
+        )
+        st.toast("✅ Sauvegardé" if ok else "❌ Échec de la sauvegarde", icon="💾")
+with _bcol3:
+    if st.button("📂 Changer", use_container_width=True):
+        st.session_state.active_dossier_id = None
+        st.session_state.dossier_loaded = False
+        st.rerun()
+
 with st.sidebar:
     st.header("1 — Actif à valoriser")
+    _restored_addr = st.session_state.get("address_value", "")
     address = st.text_input("Adresse (recommandé pour la précision)",
+                             value=_restored_addr,
                              placeholder="ex. 5 rue de la Tour, 44200 Nantes")
+    st.session_state["address_value"] = address
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         manual_commune = st.text_input("Commune", value="", placeholder="ex. Nantes")
@@ -1128,6 +1224,16 @@ else:
         n_plu = sum(1 for r in st.session_state.live_results if r.get("PLU_zone"))
         if n_plu > 0:
             st.caption(f"🏙️ {n_plu}/{len(st.session_state.live_results)} comparable(s) avec zone PLU.")
+
+        # ── Autosave automatique : le dossier se sauvegarde sans clic requis ──
+        if st.session_state.get("active_dossier_id"):
+            _ok = dossiers.save_dossier_data(
+                st.session_state.active_dossier_id,
+                dossiers.snapshot_session_state(st.session_state),
+                adresse=address or st.session_state.get("address_value", ""),
+            )
+            if _ok:
+                st.caption("💾 Dossier sauvegardé automatiquement.")
 
     df = pd.DataFrame(st.session_state.live_results)
     st.write(f"**{len(df)}** référence(s) retenue(s) (en direct, à valider).")
