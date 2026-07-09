@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Valo — L'expertise immobilière, augmentée</title>
+<meta name="description" content="Valo transforme des dizaines de références dispersées en une fourchette de valeur défendable. L'outil de valorisation tertiaire pensé pour les experts.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --teal:      #FFDF00;
+  --teal-dark: #E6C900;
+  --teal-deep: #C9AF00;
+  --yellow:    #FFDF00;
+  --ink:       #14161F;
+  --ink-soft:  #25273A;
+  --slate:     #5B6472;
+  --mist:      #8A93A3;
+  --paper:     #F7F6F3;
+  --paper-warm:#FBFAF7;
+  --line:      #E4E2DC;
+  --white:     #FFFFFF;
+
+  /* accent lisible sur fond clair (le jaune pur ne se lit pas en texte) */
+  --accent-text: #14161F;
+  --accent-ink:  #7A6A00;
+
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --shell: min(1200px, 92vw);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+.shell { width: var(--shell); margin: 0 auto; }
+
+/* ─── Typographie ─────────────────────────────────────────── */
+.display {
+  font-family: 'Fraunces', serif;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.02;
+}
+.eyebrow {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--accent-ink);
+}
+
+/* ─── Navigation ──────────────────────────────────────────── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  padding: 20px 0;
+  transition: padding 0.4s var(--ease), background 0.4s var(--ease),
+              box-shadow 0.4s var(--ease), backdrop-filter 0.4s var(--ease);
+}
+nav.scrolled {
+  padding: 12px 0;
+  background: rgba(247, 246, 243, 0.8);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 1px 0 var(--line);
+}
+.nav-inner { display: flex; align-items: center; justify-content: space-between; }
+.logo {
+  font-family: 'Fraunces', serif; font-weight: 600; font-size: 26px;
+  letter-spacing: -0.03em; color: var(--ink); text-decoration: none;
+  display: flex; align-items: baseline; gap: 2px;
+}
+.logo .dot { color: var(--accent-ink); }
+.nav-links { display: flex; align-items: center; gap: 36px; }
+.nav-links a {
+  font-size: 14px; font-weight: 500; color: var(--slate);
+  text-decoration: none; transition: color 0.25s var(--ease);
+}
+.nav-links a:hover { color: var(--ink); }
+.nav-cta {
+  background: var(--ink); color: var(--white) !important;
+  padding: 9px 18px; border-radius: 100px; font-size: 14px; font-weight: 600;
+  transition: transform 0.25s var(--ease), background 0.25s var(--ease) !important;
+}
+.nav-cta:hover { background: var(--ink-soft); transform: translateY(-1px); }
+@media (max-width: 720px) { .nav-links a:not(.nav-cta) { display: none; } }
+
+/* ─── Hero ────────────────────────────────────────────────── */
+.hero {
+  min-height: 100vh; display: flex; align-items: center;
+  position: relative; padding: 120px 0 80px;
+  background:
+    radial-gradient(ellipse 80% 50% at 70% 20%, rgba(255,223,0,0.10), transparent 60%),
+    var(--paper);
+}
+.hero-grid {
+  display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 64px; align-items: center;
+  width: 100%;
+}
+@media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; gap: 48px; } }
+
+.hero-copy .eyebrow { opacity: 0; animation: fadeUp 0.7s var(--ease) 0.1s forwards; }
+.hero-h1 {
+  font-size: clamp(42px, 6vw, 76px); margin: 20px 0 24px;
+  color: var(--ink);
+  opacity: 0; animation: fadeUp 0.8s var(--ease) 0.2s forwards;
+}
+.hero-h1 em {
+  font-style: italic; color: var(--ink);
+  background: linear-gradient(transparent 62%, var(--yellow) 62%);
+}
+.hero-sub {
+  font-size: clamp(17px, 2vw, 20px); color: var(--slate); max-width: 30em;
+  line-height: 1.55;
+  opacity: 0; animation: fadeUp 0.8s var(--ease) 0.35s forwards;
+}
+.hero-actions {
+  display: flex; gap: 14px; margin-top: 36px; flex-wrap: wrap;
+  opacity: 0; animation: fadeUp 0.8s var(--ease) 0.5s forwards;
+}
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 26px; border-radius: 100px; font-size: 15px; font-weight: 600;
+  text-decoration: none; cursor: pointer; border: none;
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease), background 0.25s var(--ease);
+}
+.btn-primary {
+  background: var(--ink); color: var(--white);
+  box-shadow: 0 8px 24px -8px rgba(20,22,31,0.4);
+}
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 14px 32px -10px rgba(20,22,31,0.5); background: var(--ink-soft); }
+.btn-primary .arrow { transition: transform 0.25s var(--ease); }
+.btn-primary:hover .arrow { transform: translateX(3px); }
+.btn-ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn-ghost:hover { border-color: var(--ink); transform: translateY(-2px); }
+
+.hero-trust {
+  margin-top: 44px; display: flex; align-items: center; gap: 24px;
+  opacity: 0; animation: fadeUp 0.8s var(--ease) 0.65s forwards;
+}
+.hero-trust-stat { display: flex; flex-direction: column; }
+.hero-trust-num { font-family: 'Fraunces', serif; font-size: 28px; font-weight: 600; color: var(--ink); }
+.hero-trust-lbl { font-size: 12.5px; color: var(--mist); margin-top: 2px; }
+.hero-trust-div { width: 1px; height: 36px; background: var(--line); }
+
+/* ─── Signature : triangulation animée ────────────────────── */
+.triangulation {
+  position: relative; aspect-ratio: 1; width: 100%; max-width: 480px; margin: 0 auto;
+  opacity: 0; animation: fadeIn 1s var(--ease) 0.4s forwards;
+}
+.tri-svg { width: 100%; height: 100%; overflow: visible; }
+.tri-node {
+  fill: var(--white); stroke: var(--ink-soft); stroke-width: 2;
+  filter: drop-shadow(0 4px 12px rgba(20,22,31,0.15));
+}
+.tri-node-label {
+  font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600;
+  fill: var(--slate); text-anchor: middle;
+}
+.tri-line {
+  stroke: var(--ink-soft); stroke-width: 1.5; stroke-dasharray: 4 4;
+  opacity: 0.3;
+  animation: dashMove 20s linear infinite;
+}
+@keyframes dashMove { to { stroke-dashoffset: -100; } }
+.tri-center {
+  fill: var(--yellow); stroke: var(--ink); stroke-width: 2.5;
+  filter: drop-shadow(0 8px 20px rgba(255,223,0,0.4));
+}
+.tri-center-pulse {
+  fill: none; stroke: var(--yellow); stroke-width: 2;
+  transform-origin: center; transform-box: fill-box;
+  animation: pulse 3s var(--ease-soft) infinite;
+}
+@keyframes pulse {
+  0% { r: 26; opacity: 0.6; } 100% { r: 60; opacity: 0; }
+}
+.tri-value {
+  font-family: 'Fraunces', serif; font-size: 15px; font-weight: 600;
+  fill: var(--ink); text-anchor: middle;
+}
+.tri-value-lbl {
+  font-family: 'Inter', sans-serif; font-size: 8px; font-weight: 600;
+  letter-spacing: 0.1em; fill: var(--ink-soft); text-anchor: middle;
+  text-transform: uppercase;
+}
+
+.tri-node-group { opacity: 0; animation: nodeIn 0.6s var(--ease) forwards; }
+.tri-node-group:nth-child(1) { animation-delay: 0.8s; }
+.tri-node-group:nth-child(2) { animation-delay: 0.95s; }
+.tri-node-group:nth-child(3) { animation-delay: 1.1s; }
+.tri-node-group:nth-child(4) { animation-delay: 1.25s; }
+.tri-node-group:nth-child(5) { animation-delay: 1.4s; }
+@keyframes nodeIn { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
+
+/* ─── Bandeau logos / confiance ───────────────────────────── */
+.marquee-band {
+  padding: 32px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  background: var(--paper-warm);
+}
+.marquee-label {
+  text-align: center; font-size: 12px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--mist); margin-bottom: 20px;
+}
+.sources-row {
+  display: flex; align-items: center; justify-content: center; gap: 40px; flex-wrap: wrap;
+}
+.source-chip {
+  font-size: 15px; font-weight: 600; color: var(--slate); letter-spacing: -0.01em;
+  display: flex; align-items: center; gap: 8px;
+}
+.source-chip .tick { color: var(--accent-ink); font-size: 13px; }
+
+/* ─── Sections génériques ─────────────────────────────────── */
+section { padding: 110px 0; }
+.section-head { max-width: 40em; margin-bottom: 64px; }
+.section-head.center { margin-left: auto; margin-right: auto; text-align: center; }
+.section-h2 {
+  font-size: clamp(32px, 4.5vw, 52px); margin: 16px 0 20px; color: var(--ink);
+}
+.section-lead { font-size: clamp(16px, 2vw, 19px); color: var(--slate); line-height: 1.6; }
+
+/* reveal on scroll */
+.reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.8s var(--ease), transform 0.8s var(--ease); }
+.reveal.in { opacity: 1; transform: translateY(0); }
+.reveal[data-delay="1"] { transition-delay: 0.08s; }
+.reveal[data-delay="2"] { transition-delay: 0.16s; }
+.reveal[data-delay="3"] { transition-delay: 0.24s; }
+
+/* ─── Problème → Solution ─────────────────────────────────── */
+.contrast { background: var(--ink); color: var(--paper); }
+.contrast .section-h2 { color: var(--white); }
+.contrast .section-lead { color: var(--mist); }
+.contrast .eyebrow { color: var(--yellow); }
+.split {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; overflow: hidden;
+}
+@media (max-width: 780px) { .split { grid-template-columns: 1fr; } }
+.split-col { padding: 44px; }
+.split-col.before { background: rgba(255,255,255,0.02); }
+.split-col.after  { background: linear-gradient(160deg, rgba(255,223,0,0.18), rgba(255,223,0,0.05)); }
+.split-tag {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 5px 12px; border-radius: 100px; display: inline-block; margin-bottom: 24px;
+}
+.split-tag.t-before { background: rgba(255,255,255,0.08); color: var(--mist); }
+.split-tag.t-after  { background: var(--yellow); color: var(--ink); }
+.split-list { list-style: none; }
+.split-list li {
+  font-size: 16px; padding: 14px 0; display: flex; gap: 12px; align-items: flex-start;
+  border-bottom: 1px solid rgba(255,255,255,0.06); color: var(--paper);
+}
+.split-list li:last-child { border-bottom: none; }
+.split-list .ic { flex-shrink: 0; margin-top: 2px; }
+.split-col.before .split-list li { color: var(--mist); }
+
+/* ─── Fonctionnalités ─────────────────────────────────────── */
+.features-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px;
+}
+@media (max-width: 780px) { .features-grid { grid-template-columns: 1fr; } }
+.feature-card {
+  background: var(--white); border: 1px solid var(--line); border-radius: 20px;
+  padding: 40px; transition: transform 0.4s var(--ease), box-shadow 0.4s var(--ease), border-color 0.4s var(--ease);
+  position: relative; overflow: hidden;
+}
+.feature-card:hover {
+  transform: translateY(-4px); box-shadow: 0 24px 48px -20px rgba(20,22,31,0.15);
+  border-color: rgba(255,223,0,0.5);
+}
+.feature-card.wide { grid-column: 1 / -1; }
+.feature-icon {
+  width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center;
+  background: linear-gradient(150deg, var(--ink-soft), var(--ink));
+  border: 1.5px solid var(--yellow);
+  margin-bottom: 24px;
+}
+.feature-icon svg { width: 26px; height: 26px; stroke: white; fill: none; stroke-width: 1.8; }
+.feature-num {
+  position: absolute; top: 32px; right: 36px;
+  font-family: 'Fraunces', serif; font-size: 15px; color: var(--line); font-weight: 600;
+}
+.feature-title { font-size: 22px; font-weight: 600; margin-bottom: 10px; color: var(--ink); letter-spacing: -0.01em; }
+.feature-desc { font-size: 15.5px; color: var(--slate); line-height: 1.6; }
+.feature-tags { display: flex; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+.feature-tag {
+  font-size: 12px; font-weight: 600; color: var(--accent-ink);
+  background: rgba(255,223,0,0.18); padding: 5px 11px; border-radius: 100px;
+}
+
+/* ─── Méthode 3 temps ─────────────────────────────────────── */
+.method { background: var(--paper-warm); }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; margin-top: 20px; }
+@media (max-width: 780px) { .steps { grid-template-columns: 1fr; gap: 40px; } }
+.step { position: relative; }
+.step-marker {
+  font-family: 'Fraunces', serif; font-size: 56px; font-weight: 500;
+  color: var(--ink); line-height: 1; margin-bottom: 20px;
+  display: flex; align-items: baseline; gap: 4px;
+}
+.step-marker .of { font-size: 20px; color: var(--mist); }
+.step-title { font-size: 20px; font-weight: 600; margin-bottom: 10px; color: var(--ink); }
+.step-desc { font-size: 15px; color: var(--slate); line-height: 1.6; }
+.step:not(:last-child)::after {
+  content: ''; position: absolute; top: 26px; right: -16px; width: 32px; height: 1px;
+  background: var(--line);
+}
+@media (max-width: 780px) { .step::after { display: none !important; } }
+
+/* ─── Tarifs ──────────────────────────────────────────────── */
+.pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+@media (max-width: 880px) { .pricing-grid { grid-template-columns: 1fr; max-width: 420px; margin: 0 auto; } }
+.price-card {
+  background: var(--white); border: 1px solid var(--line); border-radius: 22px; padding: 40px 36px;
+  display: flex; flex-direction: column; transition: transform 0.4s var(--ease), box-shadow 0.4s var(--ease);
+}
+.price-card:hover { transform: translateY(-4px); box-shadow: 0 24px 48px -20px rgba(20,22,31,0.12); }
+.price-card.featured {
+  background: var(--ink); border-color: var(--ink); position: relative;
+  box-shadow: 0 30px 60px -25px rgba(20,22,31,0.5);
+}
+.price-badge {
+  position: absolute; top: 24px; right: 28px;
+  background: var(--yellow); color: var(--ink); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 5px 12px; border-radius: 100px;
+}
+.price-name { font-size: 14px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--mist); margin-bottom: 18px; }
+.price-card.featured .price-name { color: var(--yellow); }
+.price-amount { font-family: 'Fraunces', serif; font-size: 48px; font-weight: 600; color: var(--ink); letter-spacing: -0.02em; }
+.price-card.featured .price-amount { color: var(--white); }
+.price-period { font-size: 15px; color: var(--mist); font-family: 'Inter'; font-weight: 400; }
+.price-desc { font-size: 14.5px; color: var(--slate); margin: 14px 0 28px; line-height: 1.55; }
+.price-card.featured .price-desc { color: var(--mist); }
+.price-features { list-style: none; margin-bottom: 32px; flex-grow: 1; }
+.price-features li {
+  font-size: 14.5px; padding: 10px 0; display: flex; gap: 10px; align-items: flex-start;
+  color: var(--ink-soft); border-bottom: 1px solid var(--line);
+}
+.price-card.featured .price-features li { color: var(--paper); border-color: rgba(255,255,255,0.1); }
+.price-features .ic { color: var(--teal); flex-shrink: 0; margin-top: 1px; }
+.price-card.featured .price-features .ic { color: var(--yellow); }
+.price-btn {
+  text-align: center; padding: 14px; border-radius: 100px; font-size: 15px; font-weight: 600;
+  text-decoration: none; transition: transform 0.25s var(--ease), background 0.25s var(--ease);
+}
+.price-btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+.price-btn.ghost:hover { border-color: var(--ink); transform: translateY(-2px); }
+.price-btn.solid { background: var(--teal); color: white; }
+.price-btn.solid:hover { background: var(--teal-dark); transform: translateY(-2px); }
+.price-btn.gold { background: var(--yellow); color: var(--ink); }
+.price-btn.gold:hover { transform: translateY(-2px); box-shadow: 0 10px 24px -8px rgba(255,223,0,0.5); }
+
+/* ─── CTA final ───────────────────────────────────────────── */
+.final-cta {
+  text-align: center;
+  background:
+    radial-gradient(ellipse 60% 80% at 50% 0%, rgba(255,223,0,0.14), transparent 70%),
+    var(--paper);
+}
+.final-h2 { font-size: clamp(36px, 6vw, 68px); margin-bottom: 24px; color: var(--ink); }
+.final-h2 em {
+  font-style: italic; color: var(--ink);
+  background: linear-gradient(transparent 62%, var(--yellow) 62%);
+}
+.final-sub { font-size: 19px; color: var(--slate); max-width: 32em; margin: 0 auto 40px; line-height: 1.55; }
+
+/* ─── Footer ──────────────────────────────────────────────── */
+footer { background: var(--ink); color: var(--mist); padding: 64px 0 40px; }
+.footer-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 40px; padding-bottom: 40px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.footer-brand { max-width: 22em; }
+.footer-brand .logo { color: var(--white); margin-bottom: 14px; }
+.footer-brand p { font-size: 14.5px; line-height: 1.6; }
+.footer-cols { display: flex; gap: 64px; flex-wrap: wrap; }
+.footer-col h4 { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--paper); margin-bottom: 16px; }
+.footer-col a { display: block; font-size: 14.5px; color: var(--mist); text-decoration: none; padding: 6px 0; transition: color 0.2s var(--ease); }
+.footer-col a:hover { color: var(--yellow); }
+.footer-bottom { padding-top: 28px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .reveal { opacity: 1 !important; transform: none !important; }
+  .hero-copy .eyebrow, .hero-h1, .hero-sub, .hero-actions, .hero-trust, .triangulation,
+  .tri-node-group { opacity: 1 !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="shell nav-inner">
+    <a href="#" class="logo">Valo<span class="dot">.</span></a>
+    <div class="nav-links">
+      <a href="#methode">Méthode</a>
+      <a href="#fonctions">Fonctionnalités</a>
+      <a href="#" class="nav-cta" id="nav-login">Se connecter</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ══════════════ HERO ══════════════ -->
+<header class="hero">
+  <div class="shell hero-grid">
+    <div class="hero-copy">
+      <span class="eyebrow">Valorisation tertiaire</span>
+      <h1 class="hero-h1 display">La valeur juste, <em>par recoupement</em>.</h1>
+      <p class="hero-sub">Valo rassemble les références dispersées du marché — annonces, transactions notariales, données foncières — et les fait converger vers une fourchette de valeur que vous pouvez défendre.</p>
+      <div class="hero-actions">
+        <a href="#" class="btn btn-primary" id="hero-cta">Ouvrir l'outil <span class="arrow">→</span></a>
+        <a href="#methode" class="btn btn-ghost">Voir la méthode</a>
+      </div>
+      <div class="hero-trust">
+        <div class="hero-trust-stat">
+          <span class="hero-trust-num">28M+</span>
+          <span class="hero-trust-lbl">transactions foncières</span>
+        </div>
+        <div class="hero-trust-div"></div>
+        <div class="hero-trust-stat">
+          <span class="hero-trust-num">6</span>
+          <span class="hero-trust-lbl">sources croisées</span>
+        </div>
+        <div class="hero-trust-div"></div>
+        <div class="hero-trust-stat">
+          <span class="hero-trust-num">&lt; 5 min</span>
+          <span class="hero-trust-lbl">par estimation</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="triangulation">
+      <svg class="tri-svg" viewBox="0 0 400 400">
+        <!-- lignes de convergence -->
+        <line class="tri-line" x1="80" y1="70"  x2="200" y2="200"/>
+        <line class="tri-line" x1="330" y1="110" x2="200" y2="200"/>
+        <line class="tri-line" x1="60" y1="300" x2="200" y2="200"/>
+        <line class="tri-line" x1="310" y1="320" x2="200" y2="200"/>
+        <line class="tri-line" x1="210" y1="50"  x2="200" y2="200"/>
+
+        <!-- nœuds comparables -->
+        <g class="tri-node-group">
+          <circle class="tri-node" cx="80" cy="70" r="16"/>
+          <text class="tri-node-label" x="80" y="74">184€</text>
+        </g>
+        <g class="tri-node-group">
+          <circle class="tri-node" cx="330" cy="110" r="16"/>
+          <text class="tri-node-label" x="330" y="114">201€</text>
+        </g>
+        <g class="tri-node-group">
+          <circle class="tri-node" cx="60" cy="300" r="16"/>
+          <text class="tri-node-label" x="60" y="304">176€</text>
+        </g>
+        <g class="tri-node-group">
+          <circle class="tri-node" cx="310" cy="320" r="16"/>
+          <text class="tri-node-label" x="310" y="324">192€</text>
+        </g>
+        <g class="tri-node-group">
+          <circle class="tri-node" cx="210" cy="50" r="16"/>
+          <text class="tri-node-label" x="210" y="54">188€</text>
+        </g>
+
+        <!-- centre : valeur retenue -->
+        <circle class="tri-center-pulse" cx="200" cy="200" r="26"/>
+        <circle class="tri-center" cx="200" cy="200" r="42"/>
+        <text class="tri-value-lbl" x="200" y="192">Valeur cible</text>
+        <text class="tri-value" x="200" y="212">187 €/m²</text>
+      </svg>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════ BANDEAU SOURCES ══════════════ -->
+<div class="marquee-band">
+  <div class="shell">
+    <p class="marquee-label">Croise les sources de référence du marché</p>
+    <div class="sources-row">
+      <span class="source-chip"><span class="tick">◆</span> BureauxLocaux</span>
+      <span class="source-chip"><span class="tick">◆</span> DVF · Cerema</span>
+      <span class="source-chip"><span class="tick">◆</span> Cadastre IGN</span>
+      <span class="source-chip"><span class="tick">◆</span> Géoportail Urbanisme</span>
+      <span class="source-chip"><span class="tick">◆</span> Géorisques</span>
+      <span class="source-chip"><span class="tick">◆</span> Targomo</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ PROBLÈME → SOLUTION ══════════════ -->
+<section class="contrast">
+  <div class="shell">
+    <div class="section-head reveal">
+      <span class="eyebrow">Le quotidien de l'expert</span>
+      <h2 class="section-h2 display">Vingt onglets ouverts pour une seule valeur.</h2>
+      <p class="section-lead">Recouper les comparables à la main coûte des heures : chaque source dans un format différent, chaque annonce à géolocaliser, chaque prix à retraiter. Valo fait ce travail à votre place.</p>
+    </div>
+    <div class="split reveal" data-delay="1">
+      <div class="split-col before">
+        <span class="split-tag t-before">Sans Valo</span>
+        <ul class="split-list">
+          <li><span class="ic">·</span> Copier-coller entre sites, tableurs et cartes</li>
+          <li><span class="ic">·</span> Géolocaliser chaque référence une par une</li>
+          <li><span class="ic">·</span> Retraiter les loyers, deviner les charges</li>
+          <li><span class="ic">·</span> Reconstruire le rapport à chaque dossier</li>
+          <li><span class="ic">·</span> Aucun historique, tout repart de zéro</li>
+        </ul>
+      </div>
+      <div class="split-col after">
+        <span class="split-tag t-after">Avec Valo</span>
+        <ul class="split-list">
+          <li><span class="ic">✓</span> Une adresse suffit : les comparables remontent seuls</li>
+          <li><span class="ic">✓</span> Géolocalisation et zonage PLU automatiques</li>
+          <li><span class="ic">✓</span> Loyers HT-HC calculés, aberrations écartées</li>
+          <li><span class="ic">✓</span> Rapport Excel généré, à votre charte</li>
+          <li><span class="ic">✓</span> Chaque dossier sauvegardé et rouvrable</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ FONCTIONNALITÉS ══════════════ -->
+<section id="fonctions">
+  <div class="shell">
+    <div class="section-head reveal">
+      <span class="eyebrow">Ce que fait l'outil</span>
+      <h2 class="section-h2 display">Tout le dossier, au même endroit.</h2>
+      <p class="section-lead">De la collecte des références à l'export du rapport, chaque étape de l'expertise est couverte.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <span class="feature-num">01</span>
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        </div>
+        <h3 class="feature-title">Collecte automatique</h3>
+        <p class="feature-desc">Saisissez une adresse : Valo interroge les portails d'annonces tertiaires et remonte les comparables du secteur, géolocalisés et qualifiés.</p>
+        <div class="feature-tags"><span class="feature-tag">Bureaux</span><span class="feature-tag">Activités</span><span class="feature-tag">Commerce</span></div>
+      </div>
+      <div class="feature-card reveal" data-delay="1">
+        <span class="feature-num">02</span>
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 21s-7-6-7-11a7 7 0 0114 0c0 5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>
+        </div>
+        <h3 class="feature-title">Cartographie & environnement</h3>
+        <p class="feature-desc">Comparables sur fond satellite, zonage PLU, isochrones de déplacement, commodités du quartier — la valeur se lit dans son contexte.</p>
+        <div class="feature-tags"><span class="feature-tag">Satellite</span><span class="feature-tag">PLU</span><span class="feature-tag">Isochrones</span></div>
+      </div>
+      <div class="feature-card reveal" data-delay="2">
+        <span class="feature-num">03</span>
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l3-4 3 2 4-6"/></svg>
+        </div>
+        <h3 class="feature-title">Transactions réelles</h3>
+        <p class="feature-desc">Les mutations notariales DVF du secteur, cartographiées et filtrables, pour ancrer votre estimation dans des ventes effectives.</p>
+        <div class="feature-tags"><span class="feature-tag">DVF gratuit</span><span class="feature-tag">SOGEFI DVF+</span></div>
+      </div>
+      <div class="feature-card reveal" data-delay="3">
+        <span class="feature-num">04</span>
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+        </div>
+        <h3 class="feature-title">Rapport à votre charte</h3>
+        <p class="feature-desc">Export Excel structuré — photos, commentaires, synthèse des fourchettes — prêt à intégrer votre rapport d'expertise.</p>
+        <div class="feature-tags"><span class="feature-tag">Excel</span><span class="feature-tag">Photos</span><span class="feature-tag">Synthèse</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ MÉTHODE ══════════════ -->
+<section id="methode" class="method">
+  <div class="shell">
+    <div class="section-head center reveal">
+      <span class="eyebrow">La méthode</span>
+      <h2 class="section-h2 display">Trois temps, une valeur défendable.</h2>
+    </div>
+    <div class="steps">
+      <div class="step reveal">
+        <div class="step-marker">1<span class="of">/3</span></div>
+        <h3 class="step-title">Localiser</h3>
+        <p class="step-desc">Une adresse ou une commune. Valo géocode l'actif et définit le périmètre de recherche pertinent autour de lui.</p>
+      </div>
+      <div class="step reveal" data-delay="1">
+        <div class="step-marker">2<span class="of">/3</span></div>
+        <h3 class="step-title">Recouper</h3>
+        <p class="step-desc">Annonces, transactions et données foncières sont collectées, géolocalisées, nettoyées de leurs valeurs aberrantes, puis pondérées.</p>
+      </div>
+      <div class="step reveal" data-delay="2">
+        <div class="step-marker">3<span class="of">/3</span></div>
+        <h3 class="step-title">Conclure</h3>
+        <p class="step-desc">Une fourchette basse / cible / haute émerge, distinguée par état du bien. Vous ajustez, commentez, exportez.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ CTA FINAL ══════════════ -->
+<section class="final-cta">
+  <div class="shell reveal">
+    <h2 class="final-h2 display">La prochaine estimation, <em>en cinq minutes</em>.</h2>
+    <p class="final-sub">Rejoignez les évaluateurs qui ont remplacé leurs vingt onglets par un seul outil.</p>
+    <a href="#" class="btn btn-primary" id="final-cta" style="font-size:16px;padding:16px 32px;">Ouvrir Valo <span class="arrow">→</span></a>
+  </div>
+</section>
+
+<!-- ══════════════ FOOTER ══════════════ -->
+<footer>
+  <div class="shell">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <a href="#" class="logo">Valo<span class="dot">.</span></a>
+        <p>L'outil de valorisation tertiaire qui fait converger les références du marché vers une valeur défendable.</p>
+      </div>
+      <div class="footer-cols">
+        <div class="footer-col">
+          <h4>Produit</h4>
+          <a href="#fonctions">Fonctionnalités</a>
+          <a href="#methode">Méthode</a>
+        </div>
+        <div class="footer-col">
+          <h4>Ressources</h4>
+          <a href="#">Documentation</a>
+          <a href="#">Sources de données</a>
+          <a href="#">Nous contacter</a>
+        </div>
+        <div class="footer-col">
+          <h4>Légal</h4>
+          <a href="#">Mentions légales</a>
+          <a href="#">Confidentialité</a>
+          <a href="#">CGU</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Valo. Tous droits réservés.</span>
+      <span>Conçu pour les experts en évaluation immobilière.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Nav au scroll
+  const nav = document.getElementById('nav');
+  const onScroll = () => nav.classList.toggle('scrolled', window.scrollY > 20);
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  // Reveal on scroll
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+  // Liens vers l'app — REMPLACER par l'URL Render réelle
+  const APP_URL = 'https://valuation-tool-8eop.onrender.com';
+  ['nav-login','hero-cta','final-cta'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', (ev) => { ev.preventDefault(); window.location.href = APP_URL; });
+  });
+</script>
+
+</body>
+</html>
