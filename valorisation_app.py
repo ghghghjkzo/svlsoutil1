@@ -1,0 +1,3125 @@
+"""
+Outil de valorisation par adresse — version Streamlit (locale)
+----------------------------------------------------------------
+Installation (une seule fois) :
+    pip install streamlit pandas openpyxl requests
+
+Lancement :
+    streamlit run app.py
+
+Charge le fichier Excel au format du gabarit (onglet COMPARABLES),
+géocode via l'API Adresse du gouvernement (api-adresse.data.gouv.fr,
+gratuite, sans clé), filtre par rayon et calcule une valeur
+basse/cible/haute pondérée.
+"""
+
+import io
+import math
+import re
+import time
+from datetime import datetime
+
+import folium
+import pandas as pd
+import requests
+import streamlit as st
+import streamlit.components.v1 as components
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+import live_search
+import apis
+import auth
+import dossiers
+
+st.set_page_config(page_title="Valo — Valorisation", page_icon="🏢", layout="wide")
+
+# ── Interrupteur d'authentification ───────────────────────────────────────
+# Portail de connexion actif. Passer à False pour un accès direct temporaire
+# (mais gérer alors la persistance des dossiers, cf. RLS Supabase).
+LOGIN_ENABLED = True
+
+# ── Phase 1 : authentification (si activée) ──
+if LOGIN_ENABLED:
+    auth.require_login()
+
+# ── Logo Savills embarqué en base64 (aucune dépendance fichier) ──────────
+_logo_b64 = (
+    "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"
+    "+h0AAAAASUVORK5CYII="
+)
+SAVILLS_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
+
+/* ══════════════════════════════════════════════════════════════════════
+   VALO — DESIGN SYSTEM « instrument de précision »
+   Fond encre sombre, jaune Savills en accent unique, typo Inter.
+   Objectif : ne plus ressembler à du Streamlit standard.
+   ══════════════════════════════════════════════════════════════════════ */
+:root {
+  --ease:      cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Accent de marque */
+  --gold:       #FFDF00;
+  --gold-dim:   #E6C900;
+  --gold-deep:  #C9AF00;
+  --gold-ink:   #7A6A00;
+  --gold-glow:  rgba(255,223,0,0.14);
+
+  /* Base encre sombre */
+  --bg:         #0E0F16;
+  --panel:      #171923;
+  --panel-2:    #1E212E;
+  --panel-3:    #262A3A;
+  --line:       rgba(255,255,255,0.08);
+  --line-2:     rgba(255,255,255,0.14);
+
+  /* Texte */
+  --tx-hi:      #F4F5F8;
+  --tx:         #C7CCD6;
+  --tx-dim:     #8A93A3;
+  --tx-faint:   #5B6472;
+
+  /* Sémantique (désaturée pour fond sombre) */
+  --ok:         #34D399;
+  --ok-bg:      rgba(52,211,153,0.12);
+  --warn:       #FBBF24;
+  --warn-bg:    rgba(251,191,36,0.12);
+  --err:        #F87171;
+  --err-bg:     rgba(248,113,113,0.12);
+
+  --r-sm: 8px;  --r-md: 12px;  --r-lg: 16px;
+  --sh-1: 0 1px 2px rgba(0,0,0,0.4);
+  --sh-2: 0 8px 24px -8px rgba(0,0,0,0.5);
+  --sh-3: 0 20px 48px -16px rgba(0,0,0,0.6);
+}
+
+/* ── Base ─────────────────────────────────────────────────── */
+html, body, [class*="css"], .stApp {
+  font-family: 'Inter','Segoe UI',sans-serif !important;
+  color: var(--tx);
+}
+.stApp { background: var(--bg); }
+.main .block-container {
+  padding-top: 1.5rem !important; max-width: 1400px;
+  margin-left: auto !important; margin-right: auto !important;
+  animation: pageIn 0.5s var(--ease) both;
+}
+@keyframes pageIn { from { opacity:0; transform:translateY(8px);} to {opacity:1; transform:none;} }
+
+h1,h2,h3,h4,h5 { color: var(--tx-hi) !important; letter-spacing:-0.01em !important; }
+p, span, label, div, li { color: var(--tx); }
+a { color: var(--gold-dim); }
+hr { border-color: var(--line) !important; }
+code { background: var(--panel-2) !important; color: var(--gold-dim) !important;
+       border-radius:4px; padding:1px 5px; }
+
+/* section subheaders → petites capitales façon instrument */
+.main h3, .main [data-testid="stHeadingWithActionElements"] h3 {
+  font-size: 15px !important; font-weight:700 !important;
+  text-transform: uppercase; letter-spacing:0.06em !important;
+  color: var(--tx-hi) !important;
+  padding-bottom: 8px; border-bottom:1px solid var(--line); margin-bottom:16px !important;
+}
+
+/* ── Sidebar : panneau de contrôle ────────────────────────── */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #12131C 0%, #0E0F16 100%) !important;
+  border-right: 1px solid var(--line);
+}
+[data-testid="stSidebar"] * { color: var(--tx) !important; }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+  color: var(--gold) !important; font-size:11px !important; font-weight:700 !important;
+  text-transform: uppercase; letter-spacing:0.12em !important;
+  margin:22px 0 10px !important; opacity:0.9;
+}
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] * {
+  color: #E9EBF0 !important; font-size:12.5px !important; font-weight:500 !important;
+}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+  color: var(--tx-dim) !important; font-size:11.5px !important;
+}
+
+/* champs sidebar : fond opaque sombre, texte clair, focus doré */
+[data-testid="stSidebar"] input[type="text"],
+[data-testid="stSidebar"] input[type="password"],
+[data-testid="stSidebar"] input[type="number"],
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] > div {
+  background: #0C0D13 !important; color: var(--tx-hi) !important;
+  border: 1px solid var(--line-2) !important; border-radius: var(--r-sm) !important;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease) !important;
+}
+[data-testid="stSidebar"] input:focus, [data-testid="stSidebar"] textarea:focus {
+  border-color: var(--gold) !important;
+  box-shadow: 0 0 0 3px var(--gold-glow) !important;
+}
+[data-testid="stSidebar"] input::placeholder { color: var(--tx-faint) !important; }
+
+/* expanders sidebar (sections API) */
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid var(--line) !important; border-radius: var(--r-sm) !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary * { color:#E9EBF0 !important; }
+[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover * { color: var(--gold) !important; }
+
+/* ── Cartes métriques : cadrans ───────────────────────────── */
+[data-testid="stMetric"] {
+  background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 16px 18px; box-shadow: var(--sh-1);
+  transition: transform .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease);
+  position: relative; overflow: hidden;
+}
+[data-testid="stMetric"]::before {
+  content:''; position:absolute; top:0; left:0; width:3px; height:100%;
+  background: var(--gold); opacity:0; transition:opacity .3s var(--ease);
+}
+[data-testid="stMetric"]:hover {
+  transform: translateY(-2px); border-color: var(--line-2); box-shadow: var(--sh-2);
+}
+[data-testid="stMetric"]:hover::before { opacity:1; }
+[data-testid="stMetricLabel"] * {
+  font-size:10.5px !important; color: var(--tx-dim) !important; font-weight:600 !important;
+  text-transform:uppercase; letter-spacing:0.08em !important;
+}
+[data-testid="stMetricValue"] {
+  font-size:26px !important; font-weight:700 !important; color: var(--tx-hi) !important;
+  font-variant-numeric: tabular-nums;
+}
+[data-testid="stMetricDelta"] * { font-size:12px !important; }
+
+/* ── Boutons ──────────────────────────────────────────────── */
+.stButton > button {
+  background: var(--gold) !important; color:#14161F !important;
+  font-weight:700 !important; border:none !important; border-radius: var(--r-sm) !important;
+  font-size:13.5px !important; padding:9px 20px !important; letter-spacing:0.01em;
+  box-shadow: var(--sh-1);
+  transition: transform .22s var(--ease), box-shadow .22s var(--ease), background .2s var(--ease) !important;
+}
+.stButton > button:hover {
+  background: var(--gold-dim) !important; transform: translateY(-1px);
+  box-shadow: 0 8px 20px -6px rgba(255,223,0,0.4);
+}
+.stButton > button:active { transform: translateY(0) scale(.98); }
+.stButton > button:disabled {
+  background: var(--panel-3) !important; color: var(--tx-faint) !important;
+  box-shadow:none; cursor:not-allowed;
+}
+/* boutons secondaires (kind="secondary") */
+.stButton > button[kind="secondary"] {
+  background: transparent !important; color: var(--tx-hi) !important;
+  border: 1px solid var(--line-2) !important;
+}
+.stButton > button[kind="secondary"]:hover {
+  border-color: var(--gold) !important; color: var(--gold) !important; background: var(--gold-glow) !important;
+}
+.stDownloadButton > button {
+  background: transparent !important; color: var(--gold) !important;
+  border: 1px solid var(--gold) !important; font-weight:700 !important;
+  border-radius: var(--r-sm) !important; font-size:13.5px !important;
+  transition: all .22s var(--ease) !important;
+}
+.stDownloadButton > button:hover {
+  background: var(--gold) !important; color:#14161F !important; transform: translateY(-1px);
+  box-shadow: 0 8px 20px -6px rgba(255,223,0,0.4);
+}
+
+/* ── Onglets : navigation segmentée ───────────────────────── */
+[data-testid="stTabs"] [data-baseweb="tab-list"] {
+  background: var(--panel); border:1px solid var(--line);
+  border-radius: var(--r-md); gap:2px; padding:5px;
+}
+[data-testid="stTabs"] [data-baseweb="tab"] {
+  font-weight:600 !important; font-size:13px !important; color: var(--tx-dim) !important;
+  border-radius: var(--r-sm) !important; padding:8px 16px !important;
+  transition: color .25s var(--ease), background .25s var(--ease) !important;
+  border:none !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab"]:hover { color: var(--tx-hi) !important; }
+[data-testid="stTabs"] [aria-selected="true"] {
+  color:#14161F !important; background: var(--gold) !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+[data-testid="stTabs"] [data-baseweb="tab-border"] { display:none !important; }
+[data-testid="stTabsContent"] > div { animation: tabIn .35s var(--ease) both; }
+@keyframes tabIn { from {opacity:0; transform:translateY(4px);} to {opacity:1; transform:none;} }
+
+/* ── Tableaux ─────────────────────────────────────────────── */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+  border-radius: var(--r-md) !important; overflow:hidden;
+  border: 1px solid var(--line) !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataEditor"] [role="columnheader"] {
+  background: var(--panel-3) !important; color: var(--tx-hi) !important;
+  font-weight:600 !important; font-size:11.5px !important;
+  text-transform:uppercase; letter-spacing:0.03em;
+}
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataEditor"] [role="gridcell"] {
+  background: var(--panel) !important; color: var(--tx) !important; font-size:13px !important;
+}
+
+/* ── Inputs zone principale ───────────────────────────────── */
+.main input[type="text"], .main input[type="number"], .main input[type="password"],
+.main textarea, .main [data-baseweb="select"] > div {
+  background: var(--panel-2) !important; color: var(--tx-hi) !important;
+  border:1px solid var(--line-2) !important; border-radius: var(--r-sm) !important;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease) !important;
+}
+.main input:focus, .main textarea:focus {
+  border-color: var(--gold) !important; box-shadow: 0 0 0 3px var(--gold-glow) !important;
+  outline:none !important;
+}
+.main [data-testid="stWidgetLabel"] * { color: var(--tx) !important; font-weight:500; }
+
+/* radio / checkbox / slider */
+.main [data-baseweb="radio"] div, .main [data-testid="stRadio"] label * { color: var(--tx) !important; }
+input[type=range] { accent-color: var(--gold); }
+[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] { background: var(--gold) !important; }
+[data-testid="stProgress"] > div > div { background: var(--gold) !important; }
+
+/* ── Expanders zone principale ────────────────────────────── */
+.main [data-testid="stExpander"] {
+  background: var(--panel) !important; border:1px solid var(--line) !important;
+  border-radius: var(--r-md) !important;
+  transition: box-shadow .3s var(--ease), border-color .3s var(--ease) !important;
+}
+.main [data-testid="stExpander"]:hover { box-shadow: var(--sh-2); border-color: var(--line-2) !important; }
+.main [data-testid="stExpander"] summary * { color: var(--tx-hi) !important; font-weight:600 !important; }
+
+/* ── Alertes ──────────────────────────────────────────────── */
+[data-testid="stNotification"], .stAlert {
+  border-radius: var(--r-md) !important; border:1px solid var(--line) !important;
+  background: var(--panel) !important;
+  animation: alertIn .35s var(--ease) both;
+}
+[data-testid="stNotification"] *, .stAlert * { color: var(--tx) !important; }
+@keyframes alertIn { from {opacity:0; transform:translateY(-6px);} to {opacity:1; transform:none;} }
+
+/* toasts */
+[data-testid="stToast"] { background: var(--panel-2) !important; border:1px solid var(--line-2) !important; }
+[data-testid="stToast"] * { color: var(--tx-hi) !important; }
+
+/* captions */
+.main [data-testid="stCaptionContainer"] * { color: var(--tx-dim) !important; }
+
+/* file uploader */
+[data-testid="stFileUploader"] section {
+  background: var(--panel-2) !important; border:1px dashed var(--line-2) !important;
+  border-radius: var(--r-md) !important;
+}
+[data-testid="stFileUploader"] section * { color: var(--tx-dim) !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation:none !important; transition:none !important; }
+}
+</style>
+"""
+st.markdown(SAVILLS_CSS, unsafe_allow_html=True)
+
+# ── Header : barre d'instrument (logotype Valo cohérent avec la vitrine) ──
+st.markdown(
+    "<div style='display:flex;align-items:center;justify-content:space-between;"
+    "background:linear-gradient(135deg,#171923 0%,#12131C 100%);"
+    "padding:20px 26px;border-radius:16px;margin-bottom:20px;"
+    "border:1px solid rgba(255,255,255,0.08);"
+    "box-shadow:0 8px 24px -12px rgba(0,0,0,0.6)'>"
+    # Bloc gauche : logotype + sous-titre
+    "<div>"
+    "<div style='font-family:Fraunces,serif;font-size:28px;font-weight:600;"
+    "color:#F4F5F8;letter-spacing:-0.03em;line-height:1'>"
+    "Valo<span style='color:#FFDF00'>.</span></div>"
+    "<div style='color:#8A93A3;font-size:12px;margin-top:5px;font-weight:500;"
+    "letter-spacing:0.02em'>Valorisation tertiaire · Bureaux · Locaux d'activités · Commerce</div>"
+    "</div>"
+    # Bloc droit : badge discret
+    "<div style='font-size:10.5px;font-weight:700;letter-spacing:0.12em;"
+    "text-transform:uppercase;color:#7A6A00;background:rgba(255,223,0,0.12);"
+    "padding:6px 12px;border-radius:100px;border:1px solid rgba(255,223,0,0.25)'>"
+    "Savills</div>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+BAN_URL = "https://api-adresse.data.gouv.fr/search/"
+
+
+# ---------------------------------------------------------------- géocodage
+@st.cache_data(show_spinner=False)
+def geocode(query: str):
+    """Retourne un dict {lat, lon, label, city, postcode} ou None. Mis en cache."""
+    if not query or not str(query).strip():
+        return None
+    try:
+        r = requests.get(BAN_URL, params={"q": query, "limit": 1}, timeout=8)
+        r.raise_for_status()
+        feats = r.json().get("features", [])
+        if not feats:
+            return None
+        f = feats[0]
+        coords = (f.get("geometry") or {}).get("coordinates")
+        if not coords or len(coords) < 2:
+            return None
+        lon, lat = coords[0], coords[1]
+        props = f.get("properties", {})
+        return {
+            "lat": lat, "lon": lon,
+            "label": props.get("label", query),
+            "city": props.get("city", ""),
+            "postcode": props.get("postcode", ""),
+        }
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        # ValueError = JSON malformé ; KeyError/TypeError = structure inattendue
+        return None
+
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def to_num(v):
+    try:
+        if v is None or v == "":
+            return None
+        return float(str(v).replace(",", ".").replace(" ", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+# ------------------------------------------------- extraction type de bail / preneur
+BAIL_RE = re.compile(r"bail\s+(commercial|d[ée]rogatoire|professionnel)\s*(\d/\d/\d)?", re.I)
+PRENEUR_RE = re.compile(r"lou[ée]\s+(?:à|a)\s+(?:la\s+soci[ée]t[ée]\s+)?([A-ZÀ-Ü][\w\-' ]{2,40})", re.I)
+
+
+def extract_type_bail(row_):
+    obs = str(row_.get("Observations", "") or "")
+    m = BAIL_RE.search(obs)
+    if m:
+        return f"Bail {m.group(1)}{' ' + m.group(2) if m.group(2) else ''}".strip()
+    opv = row_.get("Operation")
+    if pd.notna(opv) and opv not in ("", "Non disponible"):
+        return str(opv)
+    return "Non disponible"
+
+
+def extract_preneur_etat(row_):
+    obs = str(row_.get("Observations", "") or "")
+    m = PRENEUR_RE.search(obs)
+    if m:
+        return m.group(1).strip()
+    etat = row_.get("Etat")
+    if pd.notna(etat) and etat not in ("", "Non disponible"):
+        return str(etat)
+    return "Non disponible"
+
+
+def auto_comment(r: dict) -> str:
+    """Génère un commentaire synthétique à partir des champs disponibles.
+    Le commentaire est pré-rempli mais reste éditable dans le tableau."""
+    parts = []
+    # Type d'opération + état
+    op  = str(r.get("Operation", "") or r.get("Date_transaction", "") or "")
+    etat = str(r.get("Etat", "") or "").strip()
+    if "Offre" in op or "offre" in op:
+        parts.append("Offre en cours")
+    if etat and etat not in ("Non disponible", ""):
+        parts.append(etat)
+    # Surface
+    surf = r.get("Surface_m2") or r.get("Surface (m²)")
+    if surf:
+        try: parts.append(f"{int(float(surf))} m²")
+        except (ValueError, TypeError): pass
+    # Loyer / Prix
+    loyer = to_num(r.get("Loyer_HT_HC_eur_m2_an") or r.get("Loyer HT-HC €/m²/an")
+                   or r.get("Loyer_facial_eur_m2_an") or r.get("Loyer facial €/m²/an"))
+    prix  = to_num(r.get("Prix_vente_eur_m2") or r.get("Prix vente €/m²"))
+    if loyer: parts.append(f"Loyer : {loyer:.0f} €/m²/an HT-HC")
+    elif prix: parts.append(f"Prix : {prix:.0f} €/m²")
+    # Bail dans observations
+    obs = str(r.get("Observations", "") or "")[:400]
+    bail_m = re.search(r"bail\s+[\d/]+\s*ans?", obs, re.I)
+    if bail_m: parts.append(bail_m.group(0).title())
+    # Prestations notables
+    if re.search(r"climatisation", obs, re.I): parts.append("Climatisé")
+    if re.search(r"fibre", obs, re.I): parts.append("Fibre")
+    # Source
+    src = str(r.get("Source", "") or "").split(".")[0]
+    if src and src != "Non disponible": parts.append(f"Source : {src}")
+    return ". ".join(parts) + ("." if parts else "")
+
+
+def build_export_table(res_df: pd.DataFrame, operation: str = "Location") -> pd.DataFrame:
+    """Format professionnel Savills.
+    Conditionnel : colonnes loyer/charges pour Location, prix/rendement pour Vente.
+    Structure : Identification | Valorisation | Qualificatifs | Commentaire
+              | Annexes | Observations | Lien
+    """
+    rows = []
+    is_vente = operation == "Vente"
+
+    for _, r in res_df.iterrows():
+        r = r.to_dict()
+
+        # ── Identification ───────────────────────────────────────────────
+        date_val = r.get("Date_transaction") or r.get("Date", "")
+        if not date_val or str(date_val).strip() in ("", "nan", "Non disponible"):
+            date_val = "Offre en cours"
+
+        adresse = str(r.get("Adresse", "") or "").strip()
+        commune = str(r.get("Commune", "") or "").strip()
+        cp      = str(r.get("Code_postal", "") or "").strip()
+        if commune and commune not in adresse:
+            adresse_complete = f"{adresse}, {cp} {commune}".strip(", ")
+        else:
+            adresse_complete = adresse or "—"
+
+        surface = to_num(r.get("Surface_m2") or r.get("Surface (m²)"))
+        etat    = str(r.get("Etat", "") or r.get("État", "") or "—").strip()
+        type_a  = str(r.get("Type_actif", "") or r.get("Type", "") or "—").strip()
+        photo   = str(r.get("Photo_url", "") or r.get("Photo", "") or "")
+        lien    = str(r.get("Lien", "") or "")
+
+        # ── Valorisation (conditionnel) ──────────────────────────────────
+        if is_vente:
+            prix_m2     = to_num(r.get("Prix_vente_eur_m2") or r.get("Prix vente €/m²"))
+            prix_total  = to_num(r.get("Prix_vente_total_eur"))
+            rendement   = to_num(r.get("Taux_rendement_pct"))
+            valeur_cle  = prix_m2
+        else:
+            loyer_hthc  = to_num(r.get("Loyer_HT_HC_eur_m2_an") or r.get("Loyer HT-HC €/m²/an"))
+            loyer_facial= to_num(r.get("Loyer_facial_eur_m2_an") or r.get("Loyer facial €/m²/an"))
+            charges     = to_num(r.get("Charges_eur_m2_an") or r.get("Charges €/m²/an"))
+            valeur_cle  = loyer_hthc or loyer_facial
+
+        # ── Commentaire (édité ou auto) ──────────────────────────────────
+        commentaire = str(r.get("Commentaire", "") or "").strip()
+        if not commentaire:
+            commentaire = auto_comment(r)
+
+        # ── Annexes ──────────────────────────────────────────────────────
+        parkings  = r.get("Nb_parkings") or r.get("Parkings")
+        clim      = str(r.get("Climatisation", "") or "")
+        fibre     = str(r.get("Fibre", "") or "")
+        ascenseur = str(r.get("Ascenseur", "") or "")
+        obs       = str(r.get("Observations", "") or "")[:300]
+
+        # Build row
+        row = {
+            "Date": date_val,
+            "Photo": photo,
+            "Adresse complète": adresse_complete,
+            "Surface (m²)": surface,
+            "État": etat,
+            "Type d'actif": type_a,
+        }
+        if is_vente:
+            row["Prix de vente €/m²"] = prix_m2
+            if prix_total: row["Prix total €"] = prix_total
+            if rendement:  row["Rendement %"] = rendement
+        else:
+            row["Loyer HT-HC €/m²/an"] = valeur_cle
+            if loyer_facial and loyer_facial != valeur_cle:
+                row["Loyer facial €/m²/an"] = loyer_facial
+            if charges: row["Charges €/m²/an"] = charges
+
+        row["Commentaire"] = commentaire
+        # Annexes
+        if parkings: row["Parkings"]   = parkings
+        if clim and clim not in ("Non disponible", ""):     row["Clim"] = clim
+        if fibre and fibre not in ("Non disponible", ""):   row["Fibre"] = fibre
+        if ascenseur and ascenseur not in ("Non disponible", ""): row["Ascenseur"] = ascenseur
+        if obs: row["Observations"] = obs
+        row["Lien"] = lien
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _download_photo(url: str, timeout: int = 6) -> bytes | None:
+    """Télécharge une photo pour l'intégrer dans l'Excel. Retourne None en cas d'échec."""
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comparables",
+                          operation: str = "Location") -> bytes:
+    """Export Excel professionnel charte Savills avec sections visuelles."""
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter as gcl
+    import tempfile, os
+
+    C_DARK  = "25273A"; C_TEAL  = "008493"
+    C_LIGHT = "EEE8E3"; C_WHITE = "FFFFFF"; C_LINK  = "008493"
+
+    SECTION_COLS = {
+        "Identification": {"Date":14,"Photo":22,"Adresse complète":42,"Surface (m²)":12,"État":14,"Type d'actif":14},
+        "Valorisation":   {"Loyer HT-HC €/m²/an":18,"Loyer facial €/m²/an":18,"Charges €/m²/an":14,
+                           "Prix de vente €/m²":16,"Prix total €":16,"Rendement %":12},
+        "Commentaire":    {"Commentaire":50},
+        "Annexes":        {"Parkings":10,"Clim":10,"Fibre":10,"Ascenseur":12},
+        "Observations":   {"Observations":52},
+        "Source":         {"Lien":28},
+    }
+
+    available = set(export_df.columns)
+    ordered_cols, section_ranges = [], {}
+    for sect, cols in SECTION_COLS.items():
+        present = [c for c in cols if c in available]
+        if present:
+            s = len(ordered_cols) + 1
+            ordered_cols.extend(present)
+            section_ranges[sect] = (s, len(ordered_cols))
+
+    n_cols = len(ordered_cols)
+    thin  = Side(style="thin", color="D9D9D9")
+    BRD   = Border(left=thin, right=thin, top=thin, bottom=thin)
+    CTR   = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    LEFT  = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    TOPL  = Alignment(horizontal="left",   vertical="top",    wrap_text=True)
+
+    wb = Workbook(); ws = wb.active; ws.title = "Comparables"
+    ws.sheet_view.showGridLines = False
+
+    # Ligne 1 : titre
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    t = ws.cell(1,1,f"  {title}")
+    t.font = Font(name="Calibri",bold=True,size=14,color=C_WHITE)
+    t.fill = PatternFill("solid",start_color=C_DARK); t.alignment = LEFT
+    ws.row_dimensions[1].height = 32
+
+    # Ligne 2 : en-têtes de section
+    for sect,(c1,c2) in section_ranges.items():
+        ws.merge_cells(start_row=2,start_column=c1,end_row=2,end_column=c2)
+        c = ws.cell(2,c1,sect.upper())
+        c.font = Font(name="Calibri",bold=True,size=9,color=C_WHITE)
+        c.fill = PatternFill("solid",start_color=C_TEAL)
+        c.alignment = CTR; c.border = BRD
+    ws.row_dimensions[2].height = 18
+
+    # Ligne 3 : en-têtes colonnes
+    all_widths = {}
+    for d in SECTION_COLS.values(): all_widths.update(d)
+    for j,col in enumerate(ordered_cols,start=1):
+        ws.column_dimensions[gcl(j)].width = all_widths.get(col,14)
+        c = ws.cell(3,j,col)
+        c.font = Font(name="Calibri",bold=True,size=10,color=C_WHITE)
+        c.fill = PatternFill("solid",start_color=C_DARK)
+        c.alignment = CTR; c.border = BRD
+    ws.row_dimensions[3].height = 28
+
+    photo_j = (ordered_cols.index("Photo")+1) if "Photo" in ordered_cols else None
+    lien_j  = (ordered_cols.index("Lien") +1) if "Lien"  in ordered_cols else None
+    LEFT_C  = {"Adresse complète","Commentaire","Observations"}
+    FMT_EUR = {"Loyer HT-HC €/m²/an","Loyer facial €/m²/an","Charges €/m²/an","Prix de vente €/m²","Prix total €"}
+    tmp_files = []
+
+    for i,row_ in export_df.iterrows():
+        r = i + 4
+        bg = PatternFill("solid",start_color=C_LIGHT) if i%2==0 else None
+        for j,col in enumerate(ordered_cols,start=1):
+            val = row_.get(col,"")
+            c = ws.cell(r,j)
+            c.border = BRD; c.font = Font(name="Calibri",size=10)
+            if bg: c.fill = bg
+            if j == lien_j and val and str(val).startswith("http"):
+                c.hyperlink = str(val); c.value = "🔗 Voir"
+                c.font = Font(name="Calibri",size=10,color=C_LINK,underline="single")
+                c.alignment = CTR; continue
+            if j == photo_j:
+                c.value = ""; c.alignment = CTR
+            elif val is None or (isinstance(val,float) and math.isnan(val)):
+                c.value = ""; c.alignment = CTR
+            else:
+                c.value = val
+                c.alignment = TOPL if col in LEFT_C else CTR
+            if col == "Surface (m²)" and isinstance(val,(int,float)): c.number_format="#,##0"
+            elif col in FMT_EUR and isinstance(val,(int,float)): c.number_format="#,##0 €"
+        ws.row_dimensions[r].height = 75
+        if photo_j:
+            img_bytes = _download_photo(str(row_.get("Photo","") or ""))
+            if img_bytes:
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg",delete=False) as tmp:
+                        tmp.write(img_bytes); tp = tmp.name
+                    xi = XLImage(tp); xi.width,xi.height = 110,70
+                    ws.add_image(xi,f"{gcl(photo_j)}{r}"); tmp_files.append(tp)
+                except Exception: pass
+
+    ws.freeze_panes = "A4"
+
+    # Onglet Synthèse
+    ws2 = wb.create_sheet("Synthèse"); ws2.sheet_view.showGridLines = False
+    ws2.column_dimensions["A"].width = 30; ws2.column_dimensions["B"].width = 24
+    ws2.merge_cells("A1:B1")
+    h = ws2.cell(1,1,f"  Synthèse — {title}")
+    h.font = Font(name="Calibri",bold=True,size=14,color=C_WHITE)
+    h.fill = PatternFill("solid",start_color=C_DARK); h.alignment = LEFT
+    ws2.row_dimensions[1].height = 32
+    val_col = "Loyer HT-HC €/m²/an" if operation != "Vente" else "Prix de vente €/m²"
+    if val_col in export_df.columns:
+        vals = export_df[val_col].apply(to_num).dropna()
+        unit = "€/m²/an" if operation != "Vente" else "€/m²"
+        for idx,(label,val) in enumerate([
+            ("Comparables analysés", len(vals)),
+            ("Valeur basse", f"{vals.min():,.0f} {unit}" if len(vals) else "—"),
+            ("Médiane",      f"{vals.median():,.0f} {unit}" if len(vals) else "—"),
+            ("Valeur haute", f"{vals.max():,.0f} {unit}" if len(vals) else "—"),
+            ("Moyenne",      f"{vals.mean():,.0f} {unit}" if len(vals) else "—"),
+        ], start=2):
+            a = ws2.cell(idx,1,label); a.font = Font(name="Calibri",size=11,bold=True)
+            b = ws2.cell(idx,2,val);   b.font = Font(name="Calibri",size=11,color=C_TEAL)
+            ws2.row_dimensions[idx].height = 20
+
+    buf = io.BytesIO(); wb.save(buf)
+    for p in tmp_files:
+        try: os.unlink(p)
+        except OSError: pass
+    return buf.getvalue()
+
+
+# ── Suppression du titre Streamlit par défaut (remplacé par le header Savills) ──
+
+
+if LOGIN_ENABLED:
+    auth.render_user_badge()
+
+# ══════════════════════════════════════════════════════════════════════════
+# PHASE 2 — Gate dossier : l'utilisateur doit ouvrir ou créer un dossier
+# ══════════════════════════════════════════════════════════════════════════
+if LOGIN_ENABLED:
+    user = auth.current_user()
+else:
+    # Mode veille : utilisateur démo fixe → les dossiers restent persistés
+    # dans Supabase sous cet identifiant, aucun écran de connexion.
+    user = {"id": "00000000-0000-0000-0000-000000000000", "email": "demo@valo.local"}
+
+if "active_dossier_id" not in st.session_state:
+    st.session_state.active_dossier_id = None
+
+if st.session_state.active_dossier_id is None:
+    st.markdown(
+        "<div style='max-width:640px;margin:20px auto'>"
+        "<h2 style='color:#25273A'>📁 Mes dossiers</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+    existing = dossiers.list_dossiers(user["id"]) if user else []
+
+    col_new, col_list = st.columns([1, 2])
+    with col_new:
+        st.markdown("#### ➕ Nouveau dossier")
+        with st.form("new_dossier_form"):
+            nc = st.text_input("Nom du client / dossier", placeholder="ex. Actif Rue de la Tour")
+            adr = st.text_input("Adresse (optionnel, éditable ensuite)", placeholder="ex. Nantes")
+            tb = st.selectbox("Type de bien", ["Bureaux", "Activités", "Commerce", "Mixte"])
+            create = st.form_submit_button("Créer le dossier", use_container_width=True)
+        if create:
+            new_d = dossiers.create_dossier(user["id"], nc, adr, tb)
+            if new_d:
+                st.session_state.active_dossier_id = new_d["id"]
+                st.session_state.active_dossier_meta = new_d
+                st.session_state.pop("mode_radio_key", None)
+                st.session_state.live_results = []  # nouveau dossier = pas d'ancien résultat
+                st.rerun()
+            else:
+                st.error("Échec de création — vérifie la connexion à la base de données.")
+
+    with col_list:
+        st.markdown("#### 📂 Dossiers existants")
+        if not existing:
+            st.caption("Aucun dossier pour l'instant. Crée ton premier dossier à gauche.")
+        else:
+            for d in existing:
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    with c1:
+                        st.markdown(f"**{d.get('nom_client', 'Sans nom')}**")
+                        st.caption(f"{d.get('adresse','—') or '—'} · {d.get('type_bien','—')} · "
+                                   f"{d.get('statut','brouillon')}")
+                        upd = d.get("updated_at", "")
+                        if upd:
+                            st.caption(f"Modifié le {upd[:10]} à {upd[11:16]}")
+                    with c2:
+                        if st.button("Ouvrir", key=f"open_{d['id']}", use_container_width=True):
+                            st.session_state.active_dossier_id = d["id"]
+                            st.session_state.active_dossier_meta = d
+                            st.session_state.pop("mode_radio_key", None)
+                            st.rerun()
+                    with c3:
+                        if st.button("🗑️", key=f"del_{d['id']}", use_container_width=True):
+                            dossiers.delete_dossier(d["id"])
+                            st.rerun()
+    st.stop()
+
+# ── Dossier actif : chargement du contenu sauvegardé (une seule fois) ──────
+if "dossier_loaded" not in st.session_state:
+    full = dossiers.load_dossier(st.session_state.active_dossier_id)
+    if full:
+        st.session_state.active_dossier_meta = full
+        dossiers.restore_session_state(full.get("data") or {}, st.session_state)
+    st.session_state.dossier_loaded = True
+    # Fix : le widget radio "mode" garde en mémoire la dernière valeur choisie
+    # pour toute la session navigateur — sans ce reset explicite, changer de
+    # dossier n'actualise pas le mode et force à relancer une recherche à vide.
+    st.session_state["mode_radio_key"] = (
+        "Rechercher en direct (expérimental)"
+        if st.session_state.get("live_results") else "Charger un fichier Excel"
+    )
+
+# ── Bandeau dossier actif (en haut, au-dessus de tout le reste) ────────────
+_meta = st.session_state.get("active_dossier_meta", {})
+_bcol1, _bcol2, _bcol3, _bcol4, _bcol5 = st.columns([4, 1, 1, 1, 1])
+with _bcol1:
+    st.markdown(
+        f"<div style='background:#FAFBFC;border:1px solid #E6E8EC;"
+        f"border-left:3px solid #008493;"
+        f"padding:10px 16px;border-radius:10px;font-size:13px'>"
+        f"<span style='color:#8A93A3 !important;font-weight:600;text-transform:uppercase;font-size:10.5px;"
+        f"letter-spacing:0.04em'>Dossier actif</span><br>"
+        f"<b style='color:#14161F !important'>{_meta.get('nom_client','Sans nom')}</b> "
+        f"<span style='color:#25273A !important'>— {_meta.get('adresse','—') or '—'}</span></div>",
+        unsafe_allow_html=True,
+    )
+with _bcol2:
+    if st.button("💾 Sauvegarder", use_container_width=True):
+        ok = dossiers.save_dossier_data(
+            st.session_state.active_dossier_id,
+            dossiers.snapshot_session_state(st.session_state),
+        )
+        st.toast("✅ Sauvegardé" if ok else "❌ Échec de la sauvegarde", icon="💾")
+with _bcol3:
+    # ── Export Excel du dossier — réutilise build_export_table/export_to_excel_bytes ──
+    _live = st.session_state.get("live_results", [])
+    if _live:
+        _df_export = pd.DataFrame(_live)
+        # opération pas encore choisie à ce stade du script (widget plus bas) :
+        # on l'infère depuis les données déjà présentes dans le dossier
+        _n_vente = _df_export.get("Prix_vente_eur_m2", pd.Series(dtype=float)).apply(to_num).notna().sum()
+        _n_loc   = _df_export.get("Loyer_facial_eur_m2_an", pd.Series(dtype=float)).apply(to_num).notna().sum()
+        _op_inferred = "Vente" if _n_vente > _n_loc else "Location"
+        try:
+            _export_df_dossier = build_export_table(_df_export, operation=_op_inferred)
+            _xlsx_dossier = export_to_excel_bytes(
+                _export_df_dossier,
+                title=f"Extraction — {_meta.get('nom_client','Dossier')}",
+                operation=_op_inferred,
+            )
+            _safe_name_xlsx = "".join(c if c.isalnum() else "_" for c in
+                                      (_meta.get("nom_client") or "dossier"))[:40]
+            st.download_button(
+                "📊 Excel", _xlsx_dossier,
+                file_name=f"comparables_{_safe_name_xlsx}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except Exception as _e:
+            st.caption(f"⚠️ Export Excel indisponible : {_e}")
+    else:
+        st.button("📊 Excel", disabled=True, use_container_width=True,
+                   help="Lance d'abord une recherche pour avoir des comparables à exporter.")
+with _bcol4:
+    # Export du dossier complet en JSON — inclut tous les comparables, résultats DVF,
+    # et métadonnées. Réimportable ou consultable hors ligne.
+    _export_payload = {
+        "dossier": {
+            "nom_client": _meta.get("nom_client"),
+            "adresse":    _meta.get("adresse"),
+            "type_bien":  _meta.get("type_bien"),
+            "statut":     _meta.get("statut"),
+            "created_at": _meta.get("created_at"),
+            "updated_at": _meta.get("updated_at"),
+        },
+        "data": dossiers.snapshot_session_state(st.session_state),
+    }
+    import json as _json_mod
+    _export_bytes = _json_mod.dumps(_export_payload, ensure_ascii=False, indent=2,
+                                    default=str).encode("utf-8")
+    _safe_name = "".join(c if c.isalnum() else "_" for c in
+                         (_meta.get("nom_client") or "dossier"))[:40]
+    st.download_button(
+        "📤 JSON", _export_bytes,
+        file_name=f"dossier_{_safe_name}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+with _bcol5:
+    if st.button("📂 Changer", use_container_width=True):
+        st.session_state.active_dossier_id = None
+        st.session_state.dossier_loaded = False
+        st.session_state.pop("mode_radio_key", None)  # resynchronise le mode au prochain dossier
+        st.rerun()
+
+with st.sidebar:
+    st.header("1 — Actif à valoriser")
+    _restored_addr = st.session_state.get("address_value", "")
+    address = st.text_input("Adresse (recommandé pour la précision)",
+                             value=_restored_addr,
+                             placeholder="ex. 5 rue de la Tour, 44200 Nantes")
+    st.session_state["address_value"] = address
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        manual_commune = st.text_input("Commune", value="", placeholder="ex. Nantes")
+    with col_c2:
+        manual_cp = st.text_input("Code postal", value="", placeholder="ex. 44000")
+
+    if address:
+        target = geocode(address)
+        if not target:
+            st.error("Adresse introuvable ou réseau indisponible. Vérifie l'orthographe / ajoute la commune.")
+    elif manual_commune.strip():
+        target = geocode(f"{manual_commune.strip()} {manual_cp.strip()}".strip())
+        if target:
+            st.caption("ℹ️ Pas d'adresse précise saisie : centrage sur la commune (moins précis).")
+        else:
+            st.error("Commune introuvable. Vérifie l'orthographe.")
+    else:
+        target = None
+
+    if target:
+        st.success(f"✓ {target['label']}")
+        # mini-carte satellite Leaflet/Esri — pas de clé API nécessaire
+        lat, lon = target["lat"], target["lon"]
+        mini_map_html = f"""
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <div id="minimap" style="height:200px;border-radius:8px;overflow:hidden"></div>
+        <script>
+          var map = L.map('minimap', {{zoomControl:false, attributionControl:false}})
+                     .setView([{lat},{lon}], 17);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',
+            {{maxZoom:19}}).addTo(map);
+          L.marker([{lat},{lon}]).addTo(map)
+           .bindPopup("<b>{target['label']}</b>").openPopup();
+        </script>
+        """
+        components.html(mini_map_html, height=210)
+        st.caption("Vérifie que le point correspond bien au bien recherché.")
+
+    st.header("2 — Critères")
+    st.caption("Ces critères pilotent à la fois la recherche en direct et le filtrage des résultats — "
+                "un seul réglage, pas de doublon.")
+    op = st.selectbox("Opération", ["Location", "Vente", "Tous (Location + Vente)"])
+    asset_type = st.selectbox("Type d'actif", ["Bureaux", "Activités", "Commerce", "Tous"])
+    surface_target = st.number_input("Surface de l'actif (m²) — optionnel", min_value=0, value=0, step=10)
+    radius_km = st.slider("Rayon de recherche (km)", 0.2, 15.0, 5.0, 0.1)
+
+    st.subheader("Pondération du score")
+    w_prox = st.slider("Proximité", 0, 100, 45)
+    w_sim = st.slider("Similarité (surface)", 0, 100, 35)
+    w_rec = st.slider("Récence", 0, 100, 20)
+
+    st.subheader("Vitesse d'enrichissement")
+    _speed = st.radio(
+        "Mode",
+        ["🛡️ Sûr", "⚡ Rapide"],
+        horizontal=True,
+        help="Sûr : requêtes une par une, aucun risque de blocage. "
+             "Rapide : plusieurs requêtes en parallèle (~3× plus rapide), "
+             "léger risque de limitation temporaire par les serveurs.",
+    )
+    _fast_mode = _speed.endswith("Rapide")
+    if _fast_mode:
+        st.caption("⚡ Enrichissement parallélisé — plus rapide, légère prise de risque.")
+
+    st.header("3 — Source des comparables")
+    _mode_options = ["Charger un fichier Excel", "Rechercher en direct (expérimental)"]
+    _has_saved_results = bool(st.session_state.get("live_results"))
+    # Clé explicite : garantit que le mode se réinitialise correctement à
+    # chaque changement de dossier (voir fix au chargement du dossier ci-dessus).
+    if "mode_radio_key" not in st.session_state:
+        st.session_state["mode_radio_key"] = (
+            _mode_options[1] if _has_saved_results else _mode_options[0]
+        )
+    mode = st.radio("Mode", _mode_options, key="mode_radio_key")
+    if _has_saved_results and mode == _mode_options[1]:
+        st.caption(f"✅ {len(st.session_state.live_results)} comparable(s) déjà chargé(s) "
+                    f"depuis ce dossier — export possible immédiatement ci-dessous, "
+                    f"ou relance une recherche pour les mettre à jour.")
+
+    file = None
+    selected_sources = []
+    if mode == "Charger un fichier Excel":
+        file = st.file_uploader("Fichier Excel (gabarit, onglet COMPARABLES)", type=["xlsx"])
+    else:
+        if not target:
+            st.warning("Renseigne d'abord l'adresse ou la commune ci-dessus : la recherche en "
+                        "direct s'appuie dessus.")
+        else:
+            st.caption(f"📍 Recherche centrée sur **{target['city'] or target['label']}** "
+                        f"({target['postcode'] or '?'}).")
+        st.caption(f"🔎 Recherchera : **{op}** / **{asset_type}** (réglages de la section 2 ci-dessus).")
+        selected_sources = st.multiselect(
+            "Sources à interroger",
+            options=list(live_search.ALL_SOURCES.keys()),
+            default=["BureauxLocaux", "Geolocaux", "ArthurLoyd", "TournyMeyer (JLL)"],
+            help="CBRE est marqué « non vérifié » : l'URL de recherche a été extrapolée à partir "
+                 "d'un seul exemple observé, pas confirmée pour tous les cas.",
+        )
+        max_pages = st.slider(
+            "Pages à scraper par source",
+            min_value=1, max_value=10, value=3,
+            help="1 page ≈ 30 annonces (BureauxLocaux). "
+                 "3 pages = ~90 annonces. Plus de pages = plus long (~0.4s/page).",
+        )
+        only_complete = st.checkbox(
+            "Ne garder que les annonces complètes (adresse précise + prix exploitable)",
+            value=True,
+        )
+        run_live = st.button("Lancer la recherche en direct", disabled=not target)
+
+    # ── Section APIs ──────────────────────────────────────────────────
+    st.header("4 — APIs externes")
+    with st.expander("🎯 Targomo (isochrones)", expanded=False):
+        import os as _os
+        _env_key = _os.environ.get("TARGOMO_API_KEY", "")
+        if _env_key:
+            targomo_key = _env_key
+            st.caption("✅ Clé API Targomo chargée depuis le serveur (Render).")
+        else:
+            targomo_key = st.text_input(
+                "Clé API Targomo",
+                type="password",
+                placeholder="ta-clé-ici",
+                help="Gratuit sur targomo.com/developers. Astuce : ajoute TARGOMO_API_KEY "
+                     "dans les variables d'environnement Render pour ne plus la saisir.",
+            )
+        targomo_modes = st.multiselect(
+            "Modes de transport",
+            options=list(apis.TRAVEL_MODES.keys()),
+            default=["walk"],
+            format_func=lambda m: apis.TRAVEL_MODES[m],
+        )
+        targomo_times = st.multiselect(
+            "Durées (minutes)",
+            options=[5, 10, 15, 20, 30],
+            default=[5, 10, 15],
+        )
+        run_targomo = st.button("Calculer les isochrones",
+                                 disabled=not (target and targomo_key))
+
+    with st.expander("🏛️ DVF (transactions notariales)", expanded=False):
+        dvf_source = st.radio(
+            "Source des données",
+            ["Gratuit (data.gouv.fr)", "SOGEFI DVF+ (clé API, enrichi)"],
+            help="SOGEFI DVF+ est un service payant du Cerema avec données "
+                 "enrichies (matrices cadastrales, éléments de confort).",
+        )
+        _env_sogefi_key = _os.environ.get("SOGEFI_API_KEY", "")
+        sogefi_key = ""
+        if dvf_source.startswith("SOGEFI"):
+            if _env_sogefi_key:
+                sogefi_key = _env_sogefi_key
+                st.caption("✅ Clé API SOGEFI chargée depuis le serveur (Render).")
+            else:
+                sogefi_key = st.text_input(
+                    "Clé API SOGEFI",
+                    type="password",
+                    help="Astuce : ajoute SOGEFI_API_KEY dans les variables "
+                         "d'environnement Render pour ne plus la saisir.",
+                )
+        dvf_radius_km = st.slider("Rayon DVF (km)", 0.5, 5.0, 2.0, 0.5)
+        dvf_years = st.slider("Années à inclure", 1, 10, 5)
+        dvf_types = st.multiselect(
+            "Types de locaux",
+            options=list(apis.LOCAL_TERTIAIRE),
+            default=list(apis.LOCAL_TERTIAIRE),
+        )
+        run_dvf = st.button(
+            "Charger les transactions DVF",
+            disabled=not target or (dvf_source.startswith("SOGEFI") and not sogefi_key),
+        )
+        run_dvf_commune = False
+        if not dvf_source.startswith("SOGEFI"):
+            run_dvf_commune = st.button(
+                "🗺️ Cartographier toute la commune",
+                disabled=not target,
+                help="Affiche TOUTES les transactions de la commune (pas seulement "
+                     "celles dans le rayon) — gratuit, aucun coût de quota.",
+            )
+
+if mode == "Charger un fichier Excel":
+    if not file:
+        st.info("Charge ton fichier Excel dans la barre latérale pour démarrer.")
+        st.stop()
+    try:
+        df = pd.read_excel(file, sheet_name="COMPARABLES", skiprows=2)
+    except Exception:
+        df = pd.read_excel(file, skiprows=2)
+    n_before = len(df)
+    df = df[df["Commune"].notna() & df["Surface_m2"].notna()].reset_index(drop=True)
+    has_price = df["Loyer_facial_eur_m2_an"].apply(to_num).notna() | df["Prix_vente_eur_m2"].apply(to_num).notna()
+    df = df[has_price].reset_index(drop=True)
+    if len(df) < n_before:
+        st.caption(f"ℹ️ {n_before - len(df)} ligne(s) écartée(s) (commune, surface ou prix manquant).")
+    st.write(f"**{len(df)}** référence(s) exploitable(s) chargée(s) depuis le fichier.")
+else:
+    if "live_results" not in st.session_state:
+        st.session_state.live_results = []
+    if not target:
+        st.info("Renseigne d'abord l'adresse ou la commune de l'actif (section 1) pour activer "
+                 "la recherche en direct.")
+        st.stop()
+    search_commune = target.get("city") or manual_commune.strip() or "Nantes"
+    search_cp = target.get("postcode") or manual_cp.strip() or "44000"
+    if run_live:
+        ops_to_search = ["Location", "Vente"] if op.startswith("Tous") else [op]
+        types_to_search = ["Bureaux", "Activités", "Commerce"] if asset_type == "Tous" else [asset_type]
+        n_sources = len(selected_sources) if selected_sources else len(live_search.ALL_SOURCES)
+        est_sec = n_sources * max_pages * 0.5
+        with st.spinner(f"Recherche en direct — {max_pages} page(s) × {n_sources} source(s) "
+                         f"(~{est_sec:.0f}s)…"):
+            collected = []
+            for o in ops_to_search:
+                for t in types_to_search:
+                    collected += live_search.search_all_sources(
+                        search_commune, search_cp, o, t,
+                        sources=selected_sources,
+                        max_pages=max_pages,
+                    )
+
+        # ── diagnostic précis ────────────────────────────────────────────
+        merged = live_search.dedupe_listings(collected)
+        n_brut        = len(merged)
+        n_avec_prix   = sum(1 for x in merged
+                            if to_num(x.get("Loyer_facial_eur_m2_an"))
+                            or to_num(x.get("Prix_vente_eur_m2")))
+        n_avec_addr   = sum(1 for x in merged if x.get("Adresse_precise"))
+        n_geocodable  = sum(1 for x in merged
+                            if x.get("Commune") not in ("Non disponible", "", None))
+        n_complets    = sum(1 for x in merged if x.get("Complete"))
+        filtered      = live_search.filter_complete(merged) if only_complete else merged
+
+        # stockage
+        st.session_state.live_results = filtered
+        st.session_state.live_diag = {
+            "brut": n_brut, "prix": n_avec_prix,
+            "addr": n_avec_addr, "geocodable": n_geocodable,
+            "complets": n_complets, "filtres": len(filtered),
+            "only_complete": only_complete,
+        }
+
+        if not filtered:
+            diag = st.session_state.live_diag
+            st.error("❌ Aucun comparable retenu — voici pourquoi :")
+            st.markdown(f"""
+| Étape | Résultat |
+|---|---|
+| Annonces brutes scrappées | **{diag['brut']}** |
+| Dont avec un prix extrait | **{diag['prix']}** |
+| Dont avec adresse de rue précise | **{diag['addr']}** |
+| Dont géocodables (commune identifiée) | **{diag['geocodable']}** |
+| Dont complètes (commune + prix) | **{diag['complets']}** |
+| Après filtre « complètes seulement » | **{diag['filtres']}** |
+""")
+            if diag["brut"] == 0:
+                st.warning("**Cause probable : JavaScript.** Le site charge ses annonces via JS — "
+                            "requests ne peut pas les lire. Décoche toutes les sources sauf "
+                            "BureauxLocaux et réessaie.")
+            elif diag["prix"] == 0:
+                st.warning("**Cause probable : format de prix non reconnu.** "
+                            "Décoche « annonces complètes » pour voir les résultats partiels.")
+            elif diag["complets"] == 0 and only_complete:
+                st.warning(f"**Filtre trop strict.** {diag['geocodable']} annonces sont "
+                            f"géocodables mais sans prix associé, ou inversement. "
+                            f"**Décoche « Ne garder que les annonces complètes ».**")
+            st.stop()
+        else:
+            n_raw = len(merged)
+            msg = f"✅ {len(filtered)} annonce(s) retenue(s) sur {search_commune}"
+            if only_complete and n_raw > len(filtered):
+                msg += f" ({n_raw - len(filtered)} écartée(s) — adresse ou prix manquant)"
+            st.success(msg)
+    if not st.session_state.live_results:
+        st.info("Lance la recherche en direct dans la barre latérale.")
+        st.stop()
+
+    # ── Enrichissement photos ────────────────────────────────────────────
+    n_sans_photo = sum(1 for r in st.session_state.live_results if not r.get("Photo_url"))
+    if n_sans_photo > 0:
+        n_to_fetch = min(n_sans_photo, 40)
+        _lbl = "⚡ " if _fast_mode else ""
+        prog_p = st.progress(0.0, text=f"{_lbl}Récupération des photos ({n_to_fetch} fiches)…")
+        st.session_state.live_results = live_search.fetch_photos_batch(
+            st.session_state.live_results,
+            max_items=n_to_fetch,
+            progress_cb=lambda i, n: prog_p.progress(i / max(n, 1)),
+            parallel=_fast_mode,
+        )
+        prog_p.empty()
+        n_found = sum(1 for r in st.session_state.live_results if r.get("Photo_url"))
+        st.caption(f"📷 {n_found}/{len(st.session_state.live_results)} photo(s) récupérée(s).")
+
+    # ── Enrichissement géo : PLU + Cadastre pour chaque comparable ───────
+    n_sans_plu = sum(1 for r in st.session_state.live_results if not r.get("PLU_zone"))
+    if n_sans_plu > 0:
+        n_enrich = min(n_sans_plu, 30)
+        _lbl = "⚡ " if _fast_mode else ""
+        prog_g = st.progress(0.0, text=f"{_lbl}Enrichissement PLU + Cadastre ({n_enrich} adresses)…")
+        st.session_state.live_results = apis.enrich_comparables_batch(
+            st.session_state.live_results,
+            max_items=n_enrich,
+            progress_cb=lambda i, n: prog_g.progress(i / max(n, 1)),
+            parallel=_fast_mode,
+        )
+        prog_g.empty()
+        n_plu = sum(1 for r in st.session_state.live_results if r.get("PLU_zone"))
+        if n_plu > 0:
+            st.caption(f"🏙️ {n_plu}/{len(st.session_state.live_results)} comparable(s) avec zone PLU.")
+
+        # ── Autosave automatique : le dossier se sauvegarde sans clic requis ──
+        if st.session_state.get("active_dossier_id"):
+            _ok = dossiers.save_dossier_data(
+                st.session_state.active_dossier_id,
+                dossiers.snapshot_session_state(st.session_state),
+                adresse=address or st.session_state.get("address_value", ""),
+            )
+            if _ok:
+                st.caption("💾 Dossier sauvegardé automatiquement.")
+
+    df = pd.DataFrame(st.session_state.live_results)
+    st.write(f"**{len(df)}** référence(s) retenue(s) (en direct, à valider).")
+
+    # ── Vue simplifiée : uniquement l'essentiel, le détail complet reste dans
+    # l'export (Excel/CSV) et les tableaux Neuf/Seconde main plus bas ──────
+    def _prix_simple(row):
+        return (to_num(row.get("Loyer_HT_HC_eur_m2_an"))
+                or to_num(row.get("Loyer_facial_eur_m2_an"))
+                or to_num(row.get("Prix_vente_eur_m2")))
+
+    _simple_df = pd.DataFrame({
+        "Adresse":  df.get("Adresse", ""),
+        "Ville":    df.get("Commune", ""),
+        "Pays":     "France",
+        "Latitude": df.get("_lat"),
+        "Longitude":df.get("_lon"),
+        "Surface (m²)": df.get("Surface_m2"),
+        "Prix (€/m²)":  df.apply(_prix_simple, axis=1) if not df.empty else pd.Series(dtype=float),
+    })
+    st.dataframe(
+        _simple_df, use_container_width=True, hide_index=True,
+        column_config={
+            "Latitude":  st.column_config.NumberColumn(format="%.5f"),
+            "Longitude": st.column_config.NumberColumn(format="%.5f"),
+            "Surface (m²)": st.column_config.NumberColumn(format="%d m²"),
+            "Prix (€/m²)":  st.column_config.NumberColumn(format="%.0f €"),
+        },
+    )
+    st.caption("💡 Vue simplifiée. Le détail complet (état, prestations, photos, "
+                "commentaires…) est disponible dans les tableaux Neuf/Seconde main "
+                "ci-dessous et dans l'export.")
+
+if not target:
+    st.warning("Renseigne et valide une adresse cible pour lancer l'analyse.")
+    st.stop()
+
+t_lat, t_lon, t_label = target["lat"], target["lon"], target["label"]
+radius_m = radius_km * 1000
+
+# ---------------------------------------------------------------- géocodage des comps
+progress = st.progress(0.0, text="Géocodage des comparables…")
+lats, lons, dists = [], [], []
+for i, row_ in df.iterrows():
+    lat = to_num(row_.get("Latitude"))
+    lon = to_num(row_.get("Longitude"))
+    if lat is None or lon is None:
+        addr_val = str(row_.get("Adresse", "") or "")
+        # n'inclure l'adresse que si elle contient vraiment une info de rue
+        addr_clean = "" if any(x in addr_val.lower() for x in
+                               ("non disponible", "non extraite", "adresse précise")) \
+                     else addr_val.strip()
+        commune = str(row_.get("Commune", "") or "").strip()
+        cp      = str(row_.get("Code_postal", "") or "").strip()
+        # construire la query en garantissant qu'on a au moins la commune
+        parts = [p for p in [addr_clean, cp, commune] if p and p != "Non disponible"]
+        q = " ".join(parts)
+        g = geocode(q) if q else None
+        if g:
+            lat, lon = g["lat"], g["lon"]
+        time.sleep(0.05)
+    # stocker None explicitement (pas NaN) pour les coords manquantes
+    lats.append(float(lat) if lat is not None else None)
+    lons.append(float(lon) if lon is not None else None)
+    dists.append(haversine_m(t_lat, t_lon, lat, lon)
+                 if (lat is not None and lon is not None) else None)
+    progress.progress((i + 1) / max(len(df), 1), text=f"Géocodage… {i+1}/{len(df)}")
+progress.empty()
+
+df["_lat"], df["_lon"], df["_dist"] = lats, lons, dists
+
+# ---------------------------------------------------------------- filtrage + score
+def _is_unknown(v):
+    return v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() in ("", "Non disponible")
+
+op_filter = None if op.startswith("Tous") else op
+type_filter = None if asset_type == "Tous" else asset_type
+
+def passes(row_):
+    if row_["_dist"] is None or row_["_dist"] > radius_m:
+        return False
+    # une ligne dont l'opération/le type est inconnu n'est PAS exclue : on ne sait pas, donc on
+    # ne rejette pas — seul un désaccord confirmé exclut la ligne.
+    if op_filter and not _is_unknown(row_.get("Operation")) and row_.get("Operation") != op_filter:
+        return False
+    if type_filter and not _is_unknown(row_.get("Type_actif")) and row_.get("Type_actif") != type_filter:
+        return False
+    return True
+
+res = df[df.apply(passes, axis=1)].copy()
+
+# ── Diagnostic non-bloquant (sans st.stop) ───────────────────────────────
+if res.empty:
+    n_total = len(df)
+    n_geocoded = int(df["_lat"].notna().sum())
+    n_in_radius = int((df["_dist"].notna() & (df["_dist"] <= radius_m)).sum())
+    st.warning(
+        f"⚠️ 0 comparable dans le rayon {radius_km} km (sur {n_geocoded} géocodés). "
+        f"Les tabs restent accessibles — élargis le rayon ou consulte la carte pour voir "
+        f"où sont les annonces."
+    )
+
+# ── Score ────────────────────────────────────────────────────────────────
+now = datetime.now()
+def score_row(row_):
+    p_prox = max(0.0, 1 - row_["_dist"] / radius_m) if row_["_dist"] else 0.5
+    sc = to_num(row_.get("Surface_m2"))
+    p_sim = (min(sc, surface_target) / max(sc, surface_target)
+             if surface_target and sc else 0.5)
+    p_rec = 0.5
+    dt = pd.to_datetime(row_.get("Date_transaction"), errors="coerce")
+    if pd.notna(dt):
+        months = (now - dt.to_pydatetime()).days / 30.4
+        p_rec = max(0.0, 1 - months / 36)
+    wsum = (w_prox + w_sim + w_rec) or 1
+    return (w_prox * p_prox + w_sim * p_sim + w_rec * p_rec) / wsum
+
+if not res.empty:
+    res["_score"] = res.apply(score_row, axis=1)
+    res = res.sort_values("_score", ascending=False)
+
+# ── Champ de valorisation ────────────────────────────────────────────────
+if op == "Vente":
+    field = "Prix_vente_eur_m2"
+elif op == "Location":
+    field = "Loyer_facial_eur_m2_an"
+else:
+    if not res.empty:
+        n_vente = res["Prix_vente_eur_m2"].apply(to_num).notna().sum() if "Prix_vente_eur_m2" in res else 0
+        n_location = res["Loyer_facial_eur_m2_an"].apply(to_num).notna().sum() if "Loyer_facial_eur_m2_an" in res else 0
+        field = "Prix_vente_eur_m2" if n_vente >= n_location else "Loyer_facial_eur_m2_an"
+    else:
+        field = "Loyer_facial_eur_m2_an"
+
+is_vente_field = field == "Prix_vente_eur_m2"
+bounds = ((live_search.PRIX_M2_MIN, live_search.PRIX_M2_MAX) if is_vente_field
+          else (live_search.LOYER_M2_AN_MIN, live_search.LOYER_M2_AN_MAX))
+
+def remove_outliers_iqr(series: pd.Series, k: float = 1.5) -> pd.Series:
+    """Supprime les outliers par la méthode IQR (Tukey).
+    k=1.5 → outliers modérés ; k=3.0 → outliers extrêmes seulement.
+    Robuste aux distributions asymétriques (loyers immo)."""
+    if len(series) < 4:
+        return series  # trop peu de points pour détecter des outliers
+    q1, q3 = series.quantile(0.25), series.quantile(0.75)
+    iqr = q3 - q1
+    if iqr == 0:
+        return series  # distribution plate, pas d'outliers
+    lower = q1 - k * iqr
+    upper = q3 + k * iqr
+    return series[(series >= lower) & (series <= upper)]
+
+
+if not res.empty:
+    raw_vals = res[field].apply(to_num)
+    plausible_mask = raw_vals.notna() & raw_vals.between(*bounds)
+    vals_plaus = raw_vals[plausible_mask]
+    # Filtrage IQR : retire les outliers statistiques
+    vals = remove_outliers_iqr(vals_plaus)
+    n_implausible = int((raw_vals.notna() & ~plausible_mask).sum())
+    n_outliers = len(vals_plaus) - len(vals)
+    weights = res.loc[vals.index, "_score"]
+else:
+    vals = pd.Series(dtype=float)
+    weights = pd.Series(dtype=float)
+    n_implausible = 0
+
+unit = "€/m²" if is_vente_field else "€/m²/an HT-HC"
+
+if n_implausible:
+    st.caption(f"⚠️ {n_implausible} valeur(s) hors fourchette écartée(s).")
+if not res.empty and "n_outliers" in dir():
+    if n_outliers > 0:
+        st.caption(f"📊 {n_outliers} outlier(s) retiré(s) par filtrage IQR (valeurs aberrantes).")
+
+COLS_KEEP = {
+    "Adresse":                "Adresse",
+    "Commune":                "Commune",
+    "Type_actif":             "Type",
+    "Etat":                   "État",
+    "Surface_m2":             "Surface (m²)",
+    "Loyer_facial_eur_m2_an": "Loyer facial €/m²/an",
+    "Charges_eur_m2_an":      "Charges €/m²/an",
+    "Loyer_HT_HC_eur_m2_an":  "Loyer HT-HC €/m²/an",
+    "Prix_vente_eur_m2":      "Prix vente €/m²",
+    "Nb_parkings":            "Parkings",
+    "Date_transaction":       "Date",
+    "Source":                 "Source",
+    "Lien":                   "Lien",
+    "Photo_url":              "Photo",
+    "Commentaire":            "Commentaire",
+}
+COL_CONFIG = {
+    "Lien":                   st.column_config.LinkColumn("Lien", display_text="🔗 Annonce"),
+    "Photo":                  st.column_config.LinkColumn("Photo", display_text="🖼️ Voir"),
+    "Surface (m²)":           st.column_config.NumberColumn(format="%d m²"),
+    "Loyer facial €/m²/an":  st.column_config.NumberColumn(format="%.0f €"),
+    "Charges €/m²/an":       st.column_config.NumberColumn(format="%.0f €"),
+    "Loyer HT-HC €/m²/an":   st.column_config.NumberColumn(format="%.0f €"),
+    "Prix vente €/m²":        st.column_config.NumberColumn(format="%.0f €"),
+    "Parkings":               st.column_config.NumberColumn(format="%d"),
+    "Commentaire":            st.column_config.TextColumn(
+        "Commentaire",
+        help="Ex : Preneur : XYZ. Bail 3/6/9 en date du 15/01/2025.",
+        width="large",
+    ),
+}
+
+def valo_bloc(df_subset: pd.DataFrame, label: str, color: str, key_suffix: str):
+    """Affiche un tableau éditable + les métriques de valorisation pour un sous-groupe."""
+    avail = {k: v for k, v in COLS_KEEP.items() if k in df_subset.columns}
+    display = df_subset[list(avail.keys())].copy().rename(columns=avail)
+    if "Loyer HT-HC €/m²/an" not in display.columns:
+        display["Loyer HT-HC €/m²/an"] = None
+
+    # ── champ de valorisation : HT-HC si dispo, sinon facial en repli ──
+    if is_vente_field:
+        v_field = "Prix vente €/m²"
+        display["_val"] = display[v_field].apply(to_num) if v_field in display.columns else None
+    else:
+        hthc = display["Loyer HT-HC €/m²/an"].apply(to_num) if "Loyer HT-HC €/m²/an" in display.columns else pd.Series(dtype=float)
+        facial = display["Loyer facial €/m²/an"].apply(to_num) if "Loyer facial €/m²/an" in display.columns else pd.Series(dtype=float)
+        # combine : HT-HC en priorité, facial quand HT-HC est absent
+        combined = hthc.combine_first(facial) if not hthc.empty else facial
+        display["_val"] = combined
+        v_field = "_val"
+
+    raw = display[v_field].apply(to_num) if v_field != "_val" else display["_val"]
+    plaus = raw[raw.between(*bounds)]
+    # Filtrage IQR : retire les outliers avant calcul des métriques
+    plaus = remove_outliers_iqr(plaus)
+    n = len(plaus)
+
+    if n == 0:
+        st.info(f"Aucun comparable {label} avec valeur exploitable dans le rayon.")
+        return display
+
+    w = res.loc[df_subset.index, "_score"].reindex(plaus.index).fillna(0.5)
+    cible = (plaus * w).sum() / w.sum() if w.sum() > 0 else plaus.mean()
+    basse, haute, med = plaus.min(), plaus.max(), plaus.median()
+    conf = "🟢" if n >= 8 else ("🟡" if n >= 4 else "🔴")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Loyer bas" if not is_vente_field else "Prix bas",
+              f"{basse:,.0f} {unit}".replace(",", " "))
+    c2.metric("Loyer cible" if not is_vente_field else "Prix cible",
+              f"{cible:,.0f} {unit}".replace(",", " "))
+    c3.metric("Loyer haut" if not is_vente_field else "Prix haut",
+              f"{haute:,.0f} {unit}".replace(",", " "))
+    c4.metric("Comparables", n)
+    st.caption(f"Médiane : {med:,.0f} {unit} — Fiabilité : {conf} ({n} comp.)".replace(",", " "))
+    if n < 4:
+        st.warning("Peu de comparables — élargis le rayon ou ajoute des références.")
+
+    # tableau éditable
+    st.caption("Modifiable directement — les corrections sont répercutées dans l'export.")
+    edited = st.data_editor(
+        display, use_container_width=True, hide_index=True,
+        num_rows="fixed", column_config=COL_CONFIG, key=f"editor_{key_suffix}"
+    )
+
+    # recalcul si modification
+    if v_field in edited.columns:
+        new_v = edited[v_field].apply(to_num).dropna()
+        new_v = new_v[new_v.between(*bounds)]
+        if len(new_v) > 0:
+            cible_edit = new_v.mean()
+            if abs(cible_edit - cible) > 0.5:
+                st.info(f"💡 Après corrections → loyer cible **{cible_edit:,.0f} {unit}**".replace(",", " "))
+    return edited
+
+
+# ── Split Neuf/Restructuré  vs  Seconde main ──────────────────────────────
+ETATS_NEUF = {"Neuf", "Restructuré"}
+ETATS_SM   = {"Seconde main"}
+
+def etat_groupe(row):
+    e = str(row.get("Etat", "") or "").strip()
+    if e in ETATS_NEUF: return "neuf_restructure"
+    if e in ETATS_SM:   return "seconde_main"
+    return "inconnu"
+
+if not res.empty:
+    res["_groupe"] = res.apply(etat_groupe, axis=1)
+    res_neuf = res[res["_groupe"] == "neuf_restructure"].copy()
+    res_sm_raw = res[res["_groupe"] == "seconde_main"].copy()
+    res_inc  = res[res["_groupe"] == "inconnu"].copy()
+
+    # ── Filtre qualité : exclut les "Seconde main" sans aucune valeur exploitable ──
+    # (ni loyer facial, ni loyer HT-HC, ni prix de vente au m²) — une ligne sans
+    # prix ne sert à rien dans le calcul et pollue le tableau.
+    def _has_valeur(row):
+        for col in ("Loyer_HT_HC_eur_m2_an", "Loyer_facial_eur_m2_an", "Prix_vente_eur_m2"):
+            v = to_num(row.get(col))
+            if v is not None and v > 0:
+                return True
+        return False
+
+    if not res_sm_raw.empty:
+        _mask_valeur = res_sm_raw.apply(_has_valeur, axis=1)
+        res_sm = res_sm_raw[_mask_valeur].copy()
+        _n_excl_sm = int((~_mask_valeur).sum())
+    else:
+        res_sm = res_sm_raw
+        _n_excl_sm = 0
+else:
+    res["_groupe"] = pd.Series(dtype=str)
+    res_neuf = res_sm = res_inc = pd.DataFrame(columns=res.columns)
+    _n_excl_sm = 0
+
+total_neuf, total_sm, total_inc = len(res_neuf), len(res_sm), len(res_inc)
+
+if not res.empty:
+    st.caption(f"**{len(res)} comparables dans le rayon** : "
+               f"{total_neuf} Neuf/Restructuré · {total_sm} Seconde main · "
+               f"{total_inc} état non déterminé")
+else:
+    # Carte de la zone scrappée (hors rayon) pour aider l'utilisateur
+    st.info(
+        f"💡 **0 comparable dans le rayon de {radius_km} km.** "
+        f"La carte ci-dessous montre les {len(df)} annonces trouvées — "
+        f"élargis le rayon dans la barre latérale pour les inclure."
+    )
+
+# ── Onglets principaux ────────────────────────────────────────────────────
+
+def _valid_coord(v) -> bool:
+    """Retourne True si v est un float fini (exclut None, NaN, Inf)."""
+    try:
+        return v is not None and math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _safe_int(v, default=None):
+    """Convertit v en int si possible, sinon retourne `default`.
+    Gère explicitement NaN (truthy en Python — cause du bug int(nan))."""
+    try:
+        f = float(v)
+        if not math.isfinite(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
+def make_map(target_lat: float, target_lon: float, target_label: str,
+             res_df: pd.DataFrame, field: str, bounds: tuple) -> folium.Map:
+    """Carte Folium centrée sur l'actif cible avec tous les comparables."""
+
+    # centrage : on ne garde que les coordonnées finies pour éviter les NaN Folium
+    valid_lats = [float(v) for v in res_df["_lat"] if _valid_coord(v)]
+    valid_lons = [float(v) for v in res_df["_lon"] if _valid_coord(v)]
+    all_lats = [target_lat] + valid_lats
+    all_lons = [target_lon] + valid_lons
+    center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
+
+    m = folium.Map(location=center, zoom_start=14, tiles=None)
+
+    # ── couches de fond ──────────────────────────────────────────────────
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="🛰️ Satellite",
+        overlay=False, control=True,
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        attr="CartoDB",
+        name="🗺️ Plan",
+        overlay=False, control=True,
+    ).add_to(m)
+
+    # ── Overlay PLU (zones d'urbanisme) — IGN data.geopf.fr WMS ─────────
+    # Couche optionnelle : zones U/AU/N/A colorées selon le PLU en vigueur
+    try:
+        folium.WmsTileLayer(
+            url="https://data.geopf.fr/wms-r/wms?",
+            name="🏙️ Zones PLU",
+            fmt="image/png",
+            layers="URBANISMES_REGLEMENTES.ZONE_URBA",
+            transparent=True,
+            version="1.3.0",
+            attr="Géoportail de l'Urbanisme / IGN",
+            overlay=True,
+            control=True,
+            opacity=0.35,
+            show=False,  # désactivé par défaut, activable dans la légende
+        ).add_to(m)
+
+        # Overlay bâti (emprise des bâtiments) pour situer les immeubles
+        folium.WmsTileLayer(
+            url="https://data.geopf.fr/wms-r/wms?",
+            name="🏛️ Bâti IGN",
+            fmt="image/png",
+            layers="BDTOPO_V3:batiment",
+            transparent=True,
+            version="1.3.0",
+            attr="BD TOPO / IGN",
+            overlay=True,
+            control=True,
+            opacity=0.5,
+            show=False,
+        ).add_to(m)
+    except Exception:
+        pass  # WMS non disponible → carte fonctionne sans overlay
+
+    folium.LayerControl(position="topright", collapsed=True).add_to(m)
+
+    # ── marqueur actif cible ─────────────────────────────────────────────
+    folium.Marker(
+        location=[target_lat, target_lon],
+        popup=folium.Popup(f"<b>🏢 ACTIF À VALORISER</b><br>{target_label}", max_width=250),
+        tooltip=f"🏢 {target_label}",
+        icon=folium.Icon(color="red", icon="home", prefix="fa"),
+    ).add_to(m)
+
+    # rayon de recherche
+    radius_m_val = radius_km * 1000
+    folium.Circle(
+        location=[target_lat, target_lon],
+        radius=radius_m_val,
+        color="#B23A48", fill=True, fill_opacity=0.04,
+        tooltip=f"Rayon {radius_km:.1f} km",
+    ).add_to(m)
+
+    # ── marqueurs comparables ─────────────────────────────────────────────
+    # couleur par état
+    COULEUR_ETAT = {
+        "Neuf": "green", "Restructuré": "blue",
+        "Seconde main": "orange", "Non disponible": "gray",
+    }
+
+    # valeur min/max pour dégradé
+    vals = res_df[field].apply(to_num).dropna()
+    v_min, v_max = (vals.min(), vals.max()) if len(vals) >= 2 else (0, 1)
+
+    for _, row in res_df.iterrows():
+        lat, lon = row.get("_lat"), row.get("_lon")
+        if not _valid_coord(lat) or not _valid_coord(lon):
+            continue
+        lat, lon = float(lat), float(lon)
+
+        val = to_num(row.get(field))
+        etat = str(row.get("Etat") or "Non disponible").strip()
+        adresse = str(row.get("Adresse") or "").strip()
+        commune = str(row.get("Commune") or "").strip()
+        surface = row.get("Surface_m2")
+        lien = str(row.get("Lien") or "")
+        dist = row.get("_dist")
+        score = row.get("_score", 0)
+        source = str(row.get("Source") or "")
+
+        # label loyer/prix
+        if val is not None:
+            unit_short = "€/m²" if field == "Prix_vente_eur_m2" else "€/m²/an"
+            val_str = f"{val:,.0f} {unit_short}".replace(",", "\u202f")
+        else:
+            val_str = "Prix non extrait"
+
+        # ── PLU, Cadastre, Risques depuis les données enrichies ──────────
+        plu_zone  = str(row.get("PLU_zone", "") or "").strip()
+        plu_desc  = str(row.get("PLU_desc", "") or row.get("PLU_libelle", "") or "").strip()
+        cad_ref   = str(row.get("Cadastre_ref", "") or "").strip()
+        cad_cont  = row.get("Cadastre_contenance")   # surface parcelle m²
+
+        plu_html = ""
+        if plu_zone:
+            plu_color = apis.PLU_ZONE_COLORS.get(plu_zone[:1], "#666")
+            plu_html = (f'<span style="color:{plu_color};font-weight:bold">'
+                        f'PLU : {plu_zone}</span>'
+                        + (f' — {plu_desc}' if plu_desc and plu_desc != plu_zone else "")
+                        + "<br>")
+        cad_html = ""
+        if cad_ref:
+            cad_html = (f'<span style="color:#888;font-size:11px">📐 {cad_ref}'
+                        + (f' · parcelle {_safe_int(cad_cont)} m²' if _safe_int(cad_cont) is not None else "")
+                        + '</span><br>')
+
+        # popup HTML enrichi
+        lien_html = (f'<a href="{lien}" target="_blank" style="color:#008493">🔗 Annonce</a>'
+                     if lien and lien.startswith("http") else "")
+        popup_html = f"""
+        <div style="font-family:Arial,sans-serif;font-size:13px;min-width:220px;max-width:300px">
+          <b style="color:#25273A">{adresse}{', ' + commune if commune else ''}</b><br>
+          <span style="color:#666">{etat} · {_safe_int(surface) if _safe_int(surface) is not None else '?'} m²</span><br>
+          <span style="font-size:16px;font-weight:bold;color:#008493">{val_str}</span><br>
+          {plu_html}{cad_html}
+          <span style="color:#aaa;font-size:11px">
+            {f'{_safe_int(dist)} m' if _safe_int(dist) is not None else ''} · {source}
+          </span><br>{lien_html}
+        </div>
+        """
+        # tooltip : inclut la zone PLU si disponible
+        plu_tooltip = f" · PLU {plu_zone}" if plu_zone else ""
+        tooltip_str = f"{val_str} · {adresse or commune}{plu_tooltip}"
+        couleur = COULEUR_ETAT.get(etat, "gray")
+
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=8 if val is not None else 6,
+            color="white", weight=1.5,
+            fill=True, fill_color=couleur, fill_opacity=0.85,
+            popup=folium.Popup(popup_html, max_width=280),
+            tooltip=tooltip_str,
+        ).add_to(m)
+
+    # ── légende ─────────────────────────────────────────────────────────
+    legend_html = """
+    <div style="position:fixed;bottom:24px;right:24px;z-index:999;background:white;
+         padding:10px 14px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.2);
+         font-family:Arial,sans-serif;font-size:12px">
+      <b>État des locaux</b><br>
+      <span style="color:green">●</span> Neuf<br>
+      <span style="color:blue">●</span> Restructuré<br>
+      <span style="color:orange">●</span> Seconde main<br>
+      <span style="color:gray">●</span> Non déterminé<br>
+      <span style="color:red">⌂</span> Actif cible
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    return m
+
+
+tab_analyse, tab_carte, tab_env, tab_dvf, tab_targomo, tab_urba = st.tabs([
+    "📊 Analyse & comparables",
+    "🗺️ Carte",
+    "🏙️ Environnement",
+    "🏛️ DVF — Transactions",
+    "🎯 Targomo — Isochrones",
+    "📋 Urbanisme",
+])
+
+st.markdown("""
+<style>
+[data-testid="stTabsContent"] > div { padding-top: 0 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 1 — Analyse
+# ══════════════════════════════════════════════════════════════════════════
+with tab_analyse:
+    all_edited = {}
+
+    st.subheader("🟢 Neuf / Restructuré")
+    if res_neuf.empty:
+        st.info("Aucun comparable Neuf ou Restructuré dans le rayon avec ces critères.")
+    else:
+        all_edited["neuf"] = valo_bloc(res_neuf, "Neuf/Restructuré", "#2E7D5B", "neuf")
+
+    st.subheader("🟠 Seconde main")
+    if _n_excl_sm:
+        st.caption(f"ℹ️ {_n_excl_sm} comparable(s) Seconde main écarté(s) — aucun loyer/m² "
+                    f"ni prix de vente/m² renseigné.")
+    if res_sm.empty:
+        st.info("Aucun comparable Seconde main exploitable dans le rayon avec ces critères.")
+    else:
+        all_edited["sm"] = valo_bloc(res_sm, "Seconde main", "#B26A3C", "sm")
+
+    if not res_inc.empty:
+        with st.expander(f"État non déterminé ({total_inc} comp.) — à qualifier manuellement"):
+            st.caption("Qualifie l'état dans la colonne État pour que ces comparables "
+                        "remontent dans le bon tableau lors de la prochaine recherche.")
+            avail_inc = {k: v for k, v in COLS_KEEP.items() if k in res_inc.columns}
+            disp_inc = res_inc[list(avail_inc.keys())].copy().rename(columns=avail_inc)
+            all_edited["inc"] = st.data_editor(
+                disp_inc, use_container_width=True, hide_index=True,
+                num_rows="fixed", column_config=COL_CONFIG, key="editor_inc"
+            )
+
+    st.divider()
+    st.subheader("Export pour rapport")
+    frames = []
+    for key in ("neuf", "sm", "inc"):
+        if key in all_edited:
+            df_e = all_edited[key].copy()
+            df_e["_groupe_export"] = {"neuf": "Neuf / Restructuré",
+                                       "sm": "Seconde main",
+                                       "inc": "État non déterminé"}[key]
+            frames.append(df_e)
+    all_display = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    if not all_display.empty:
+        # ── Fix Bug SM : re-trier par l'État ÉDITÉ par l'utilisateur
+        # Si quelqu'un a changé "État non déterminé" → "Seconde main" dans le tableau,
+        # cet item doit apparaître dans la section Seconde main de l'export.
+        def _groupe_export(row):
+            e = str(row.get("État", "") or "").strip()
+            if e in ("Neuf", "Restructuré"):  return "Neuf / Restructuré"
+            if e == "Seconde main":           return "Seconde main"
+            return row.get("_groupe_export", "État non déterminé")
+        all_display["_groupe_export"] = all_display.apply(_groupe_export, axis=1)
+
+        # s'assurer que la colonne Commentaire existe (vide par défaut si non renseignée)
+        if "Commentaire" not in all_display.columns:
+            all_display["Commentaire"] = ""
+
+        # ── Persistance des éditions manuelles ───────────────────────────
+        # Reconstruit live_results à partir des tableaux édités (noms de
+        # colonnes internes), pour que corrections de commentaires, d'états
+        # et de prix survivent au changement de dossier. Puis autosave.
+        try:
+            _reinjected = all_display.rename(columns={v: k for k, v in COLS_KEEP.items()})
+            _new_live = _reinjected.drop(
+                columns=[c for c in ("_groupe_export", "_groupe", "_score", "_lat",
+                                     "_lon", "_dist") if c in _reinjected.columns],
+                errors="ignore",
+            ).to_dict("records")
+            # ne réinjecte que si le nombre de lignes correspond (sécurité)
+            if _new_live:
+                # préserve les colonnes techniques (_lat/_lon/_score) depuis l'original
+                _orig = {id(r): r for r in st.session_state.get("live_results", [])}
+                for i, rec in enumerate(_new_live):
+                    orig_list = st.session_state.get("live_results", [])
+                    if i < len(orig_list):
+                        for tech_col in ("_lat", "_lon", "_score", "_dist",
+                                          "PLU_zone", "PLU_desc", "Cadastre_ref",
+                                          "Cadastre_contenance", "Photo_url"):
+                            if tech_col in orig_list[i] and tech_col not in rec:
+                                rec[tech_col] = orig_list[i][tech_col]
+                st.session_state.live_results = _new_live
+                # autosave silencieux si un dossier est actif
+                if st.session_state.get("active_dossier_id"):
+                    dossiers.save_dossier_data(
+                        st.session_state.active_dossier_id,
+                        dossiers.snapshot_session_state(st.session_state),
+                    )
+        except Exception as _e:
+            st.caption(f"⚠️ Sauvegarde des éditions différée : {_e}")
+
+        edited_for_export = all_display.rename(columns={v: k for k, v in COLS_KEEP.items()})
+        export_df = build_export_table(edited_for_export, operation=op)
+
+        # aperçu sans la colonne Photo (URL brute peu lisible dans l'aperçu)
+        preview = export_df.drop(columns=["Photo"], errors="ignore")
+        st.dataframe(preview, use_container_width=True, hide_index=True)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            with st.spinner("Génération Excel (téléchargement des photos…)"):
+                xlsx_bytes = export_to_excel_bytes(export_df, title=f"Extraction — {t_label}", operation=op)
+            st.download_button("📥 Extraction (Excel)",
+                xlsx_bytes, file_name="extraction_comparables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col_b:
+            st.download_button("Détail complet (CSV)",
+                all_display.to_csv(index=False).encode("utf-8"),
+                file_name="comparables_detail.csv", mime="text/csv")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 2 — Carte pleine page avec comparables auto
+# ══════════════════════════════════════════════════════════════════════════
+with tab_carte:
+    field_for_map = ("Prix_vente_eur_m2" if op == "Vente"
+                     else "Loyer_HT_HC_eur_m2_an" if "Loyer_HT_HC_eur_m2_an" in df.columns
+                     else "Loyer_facial_eur_m2_an")
+    bounds_for_map = ((live_search.PRIX_M2_MIN, live_search.PRIX_M2_MAX) if op == "Vente"
+                      else (live_search.LOYER_M2_AN_MIN, live_search.LOYER_M2_AN_MAX))
+
+    # Si res est vide, affiche TOUTES les annonces géocodées (hors rayon)
+    # pour aider l'utilisateur à comprendre pourquoi rien n'est retenu
+    map_df = res if not res.empty else df[df["_lat"].apply(_valid_coord) & df["_lon"].apply(_valid_coord)].copy()
+    if res.empty and not map_df.empty:
+        st.caption(
+            f"⚠️ Aucun comparable dans le rayon actuel ({radius_km} km). "
+            f"La carte montre les **{len(map_df)} annonces scrappées** hors rayon "
+            f"— élargis le curseur dans la barre latérale pour les inclure."
+        )
+
+    folium_map = make_map(t_lat, t_lon, t_label, map_df, field_for_map, bounds_for_map)
+
+    # injection pour que la carte prenne tout l'espace vertical disponible
+    map_html = folium_map._repr_html_()
+    full_page = f"""
+    <div style="width:100%;height:88vh;margin:0;padding:0;">
+      {map_html}
+    </div>
+    <script>
+      setTimeout(function(){{
+        var iframes = parent.document.querySelectorAll('iframe');
+        iframes.forEach(function(f){{
+          if(f.contentDocument && f.contentDocument.querySelector('.folium-map')){{
+            f.style.height='88vh';
+          }}
+        }});
+      }}, 400);
+    </script>
+    """
+    components.html(full_page, height=880, scrolling=False)
+    st.caption(
+        "🔴 Actif · 🟢 Neuf · 🔵 Restructuré · 🟠 Seconde main · ⚫ Inconnu "
+        "| Clic → détails | Bouton ↗ : satellite ↔ plan"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 3 — Environnement (OpenStreetMap / Overpass)
+# ══════════════════════════════════════════════════════════════════════════
+with tab_env:
+
+    OVERPASS_MIRRORS = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+    ]
+
+    if "overpass_errors" not in st.session_state:
+        st.session_state.overpass_errors = []
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def overpass_fetch(lat: float, lon: float, radius: int, filters: str) -> list:
+        query = f"""[out:json][timeout:20];
+(node{filters}(around:{radius},{lat},{lon});
+ way{filters}(around:{radius},{lat},{lon}););
+out center;"""
+        last_error = None
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                r = requests.post(mirror, data={"data": query}, timeout=20)
+                r.raise_for_status()
+                return r.json().get("elements", [])
+            except requests.exceptions.HTTPError as e:
+                last_error = f"{mirror.split('/')[2]} — HTTP {r.status_code}"
+                if r.status_code == 429:
+                    time.sleep(1.5)  # rate-limit : on laisse souffler avant le mirror suivant
+            except Exception as e:
+                last_error = f"{mirror.split('/')[2]} — {type(e).__name__}"
+        # Tous les mirrors ont échoué : on log l'erreur réelle au lieu de l'avaler
+        if last_error:
+            st.session_state.overpass_errors.append(last_error)
+        return []
+
+    # dist_m supprimée (doublon) — on réutilise haversine_m définie plus haut dans le fichier
+    dist_m = haversine_m
+
+    def nearest(els, lat, lon):
+        best, best_d = None, float("inf")
+        for e in els:
+            elat = e.get("lat") or (e.get("center") or {}).get("lat")
+            elon = e.get("lon") or (e.get("center") or {}).get("lon")
+            if elat and elon:
+                d = dist_m(lat, lon, elat, elon)
+                if d < best_d: best_d, best = d, e
+        return best, best_d
+
+    def wmin(m): return round(m / 80)
+
+    st.subheader(f"🏙️ Environnement — {t_label}")
+    st.caption("Données OpenStreetMap via Overpass API · Mise en cache 1h · Aucune clé API")
+
+    st.session_state.overpass_errors = []  # reset avant chaque analyse
+    with st.spinner("Analyse de l'environnement en cours…"):
+        tram_els    = overpass_fetch(t_lat, t_lon, 1000, '["railway"="tram_stop"]')
+        time.sleep(0.3)
+        bus_els     = overpass_fetch(t_lat, t_lon,  800, '["highway"="bus_stop"]')
+        time.sleep(0.3)
+        train_els   = overpass_fetch(t_lat, t_lon, 3000, '["railway"="station"]')
+        time.sleep(0.3)
+        bike_els    = overpass_fetch(t_lat, t_lon,  500, '["amenity"="bicycle_rental"]')
+        time.sleep(0.3)
+        resto_300   = overpass_fetch(t_lat, t_lon,  300, '["amenity"~"restaurant|cafe|fast_food"]')
+        time.sleep(0.3)
+        resto_500   = overpass_fetch(t_lat, t_lon,  500, '["amenity"~"restaurant|cafe|fast_food"]')
+        time.sleep(0.3)
+        hotel_500   = overpass_fetch(t_lat, t_lon,  500, '["tourism"="hotel"]')
+        time.sleep(0.3)
+        bank_300    = overpass_fetch(t_lat, t_lon,  300, '["amenity"~"bank|atm"]')
+        time.sleep(0.3)
+        sport_1k    = overpass_fetch(t_lat, t_lon, 1000, '["leisure"~"fitness_centre|sports_centre"]')
+        time.sleep(0.3)
+        creche_1k   = overpass_fetch(t_lat, t_lon, 1000, '["amenity"~"childcare|kindergarten"]')
+        time.sleep(0.3)
+        supermarche = overpass_fetch(t_lat, t_lon,  500, '["shop"~"supermarket|convenience"]')
+        time.sleep(0.3)
+        pharmacy    = overpass_fetch(t_lat, t_lon,  500, '["amenity"="pharmacy"]')
+        time.sleep(0.3)
+        offices_500 = overpass_fetch(t_lat, t_lon,  500, '["office"]')
+
+    # Diagnostic réel : si tout est vide, dire pourquoi plutôt que d'afficher "0" partout
+    all_empty = not any([tram_els, bus_els, train_els, bike_els, resto_300, resto_500,
+                         hotel_500, bank_300, sport_1k, creche_1k, supermarche,
+                         pharmacy, offices_500])
+    if all_empty and st.session_state.overpass_errors:
+        st.warning(
+            "⚠️ Impossible de contacter les serveurs Overpass (OpenStreetMap) — "
+            "les résultats à 0 ci-dessous ne reflètent probablement pas la réalité du terrain."
+        )
+        with st.expander("Détail technique"):
+            for err in st.session_state.overpass_errors[-5:]:
+                st.caption(f"• {err}")
+    elif all_empty:
+        st.info("Aucune commodité recensée sur OpenStreetMap dans ce périmètre — "
+                "possible en zone rurale ou peu cartographiée.")
+
+    # Transports
+    st.markdown("### 🚌 Transports")
+    nt, dt = nearest(tram_els,  t_lat, t_lon)
+    nb, db = nearest(bus_els,   t_lat, t_lon)
+    ng, dg = nearest(train_els, t_lat, t_lon)
+    nv, dv = nearest(bike_els,  t_lat, t_lon)
+
+    tc1, tc2, tc3, tc4 = st.columns(4)
+    tc1.metric("🚋 Tram", f"{int(dt)} m" if nt else "—", f"{wmin(dt)} min" if nt else None)
+    tc2.metric("🚌 Bus",  f"{int(db)} m" if nb else "—", f"{wmin(db)} min" if nb else None)
+    tc3.metric("🚂 Gare", f"{dg/1000:.1f} km" if ng else "—", f"{wmin(dg)} min" if ng else None)
+    tc4.metric("🚲 Vélos", f"{int(dv)} m" if nv else "—", f"{wmin(dv)} min" if nv else None)
+
+    # Services
+    st.markdown("### 🍽️ Services à proximité")
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Restos/cafés 300 m", len(resto_300))
+    sc2.metric("Restos/cafés 500 m", len(resto_500))
+    sc3.metric("Hôtels 500 m", len(hotel_500))
+    sc4.metric("Banques/ATM 300 m", len(bank_300))
+    sc5, sc6, sc7, sc8 = st.columns(4)
+    sc5.metric("Salles de sport 1 km", len(sport_1k))
+    sc6.metric("Crèches 1 km", len(creche_1k))
+    sc7.metric("Supermarchés 500 m", len(supermarche))
+    sc8.metric("Pharmacies 500 m", len(pharmacy))
+
+    # Environnement tertiaire
+    st.markdown("### 🏢 Environnement tertiaire")
+    st.metric("Immeubles de bureaux / locaux 500 m", len(offices_500))
+
+    # Score
+    st.markdown("### 🏅 Score synthétique")
+    sc_t = min(
+        (40 if nt and dt<=300 else 25 if nt and dt<=600 else 0) +
+        (20 if nb and db<=200 else 10 if nb and db<=400 else 0) +
+        (25 if ng and dg<=800 else 15 if ng and dg<=1500 else 0) +
+        (15 if nv and dv<=300 else 0), 100)
+    sc_s = min(len(resto_300)*5 + len(hotel_500)*10 + len(bank_300)*5 +
+               len(sport_1k)*8 + len(creche_1k)*5, 100)
+    sc_b = min(len(offices_500)*5 + len(resto_500)*2, 100)
+    sc_g = round(sc_t*0.4 + sc_s*0.35 + sc_b*0.25)
+    note = ("⭐⭐⭐⭐⭐ Excellent" if sc_g>=80 else "⭐⭐⭐⭐ Très bon" if sc_g>=65
+            else "⭐⭐⭐ Bon" if sc_g>=50 else "⭐⭐ Moyen" if sc_g>=35 else "⭐ Faible")
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Transports /100", sc_t)
+    c2.metric("Services /100", sc_s)
+    c3.metric("Tertiaire /100", sc_b)
+    c4.metric("Score global /100", sc_g, note)
+
+    # Carte environnement
+    st.markdown("### 🗺️ Carte des commodités")
+    em = folium.Map(location=[t_lat, t_lon], zoom_start=15, tiles=None)
+    folium.TileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri", name="🛰️ Satellite", overlay=False, control=True).add_to(em)
+    folium.TileLayer(
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        attr="CartoDB", name="🗺️ Plan", overlay=False, control=True).add_to(em)
+    folium.LayerControl(position="topright", collapsed=False).add_to(em)
+    folium.Marker([t_lat, t_lon], tooltip="🏢 Actif",
+                  icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(em)
+
+    LAYERS = [
+        ("blue",      tram_els[:15],    "🚋 Tram"),
+        ("cadetblue", bus_els[:30],     "🚌 Bus"),
+        ("orange",    resto_500[:40],   "🍽️ Resto"),
+        ("purple",    hotel_500[:10],   "🏨 Hôtel"),
+        ("green",     sport_1k[:10],    "🏋️ Sport"),
+        ("darkgreen", bank_300[:10],    "🏦 Banque"),
+    ]
+    for color, els, label in LAYERS:
+        for e in els:
+            elat = e.get("lat") or (e.get("center") or {}).get("lat")
+            elon = e.get("lon") or (e.get("center") or {}).get("lon")
+            name = e.get("tags", {}).get("name", label)
+            if elat and elon:
+                folium.CircleMarker([elat, elon], radius=7,
+                    color="white", weight=1,
+                    fill=True, fill_color=color, fill_opacity=0.85,
+                    tooltip=name).add_to(em)
+
+    components.html(em._repr_html_(), height=520, scrolling=False)
+    st.caption("🔴 Actif · 🔵 Tram · 🟦 Bus · 🟠 Restos · 🟣 Hôtels · 🟢 Sport · 💚 Banques")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 4 — DVF : transactions notariales réelles
+# ══════════════════════════════════════════════════════════════════════════
+with tab_dvf:
+    st.subheader("🏛️ Transactions DVF — Données notariales")
+    if dvf_source.startswith("SOGEFI"):
+        st.caption(
+            "Source : **SOGEFI DVF+** (payant) — données CEREMA enrichies, mise à jour "
+            "semestrielle. Ventes uniquement, pas de locations."
+        )
+    else:
+        st.caption(
+            "Source : Demandes de Valeurs Foncières — data.gouv.fr (Etalab). "
+            "Transactions réelles signées chez le notaire. Ventes uniquement, pas de locations. "
+            "Données gratuites, sans clé API, avec un délai de publication de ~6 mois."
+        )
+
+    if not target:
+        st.info("Renseigne l'adresse de l'actif (section 1) pour charger les transactions DVF.")
+    else:
+        search_commune_dvf = target.get("city", "") or manual_commune.strip() or "Nantes"
+
+        if "dvf_results" not in st.session_state:
+            st.session_state.dvf_results = pd.DataFrame()
+        if "sogefi_raw_debug" not in st.session_state:
+            st.session_state.sogefi_raw_debug = None
+
+        if "dvf_commune_results" not in st.session_state:
+            st.session_state.dvf_commune_results = pd.DataFrame()
+
+        if run_dvf:
+            if dvf_source.startswith("SOGEFI"):
+                with st.spinner("Interrogation SOGEFI DVF+…"):
+                    result = apis.fetch_sogefi_mutations(
+                        lat=t_lat, lon=t_lon, api_key=sogefi_key,
+                        radius_m=dvf_radius_km * 1000,
+                        date_from=f"{2026 - dvf_years}-01-01",
+                    )
+                if not result.get("ok"):
+                    st.error(f"❌ SOGEFI DVF+ : {result.get('error')}")
+                    st.session_state.dvf_results = pd.DataFrame()
+                else:
+                    feats = result["features"]
+                    dvf_df = apis.sogefi_features_to_df(feats, t_lat, t_lon)
+                    st.session_state.dvf_results = dvf_df
+                    st.session_state.sogefi_raw_debug = (
+                        feats[0].get("properties") if feats else None
+                    )
+                    if dvf_df.empty:
+                        st.warning(
+                            f"Aucune mutation trouvée dans un rayon de {dvf_radius_km} km. "
+                            f"Essaie d'élargir le rayon."
+                        )
+                    else:
+                        st.success(f"✅ {len(dvf_df)} mutation(s) trouvée(s) via SOGEFI DVF+.")
+            else:
+                with st.spinner(f"Téléchargement DVF pour {search_commune_dvf}…"):
+                    try:
+                        dvf_df = apis.get_dvf_transactions(
+                            lat=t_lat, lon=t_lon,
+                            radius_m=dvf_radius_km * 1000,
+                            commune=search_commune_dvf,
+                            types_locaux=set(dvf_types) if dvf_types else None,
+                            annees=dvf_years,
+                        )
+                        st.session_state.dvf_results = dvf_df
+                        if dvf_df.empty:
+                            st.warning(
+                                f"Aucune transaction trouvée dans un rayon de {dvf_radius_km} km "
+                                f"pour {search_commune_dvf}. Essaie d'élargir le rayon ou de "
+                                f"changer la commune dans la barre latérale."
+                            )
+                        else:
+                            st.success(f"✅ {len(dvf_df)} transaction(s) trouvée(s).")
+                    except Exception as e:
+                        st.error(f"Erreur DVF : {e}")
+
+        if run_dvf_commune:
+            with st.spinner(f"Téléchargement de toutes les transactions de {search_commune_dvf}…"):
+                try:
+                    commune_df = apis.get_dvf_commune_complete(
+                        commune=search_commune_dvf,
+                        types_locaux=set(dvf_types) if dvf_types else None,
+                        annees=dvf_years,
+                        ref_lat=t_lat, ref_lon=t_lon,
+                    )
+                    st.session_state.dvf_commune_results = commune_df
+                    if commune_df.empty:
+                        st.warning(f"Aucune transaction trouvée pour {search_commune_dvf}.")
+                    else:
+                        st.success(f"✅ {len(commune_df)} transaction(s) trouvée(s) sur "
+                                    f"l'ensemble de {search_commune_dvf}.")
+                except Exception as e:
+                    st.error(f"Erreur DVF (commune complète) : {e}")
+
+        dvf_df = st.session_state.dvf_results
+        dvf_commune_df = st.session_state.dvf_commune_results
+
+        # ── Debug SOGEFI : vérifier le mapping des champs sur le premier vrai résultat ──
+        if dvf_source.startswith("SOGEFI") and st.session_state.sogefi_raw_debug:
+            with st.expander("🔍 Debug — propriétés brutes du premier résultat SOGEFI"):
+                st.caption(
+                    "Le schéma exact des champs SOGEFI n'a pas pu être confirmé à l'avance "
+                    "(doc Swagger avec placeholder). Vérifie ici que Date/Valeur/Surface "
+                    "sont bien mappés ; sinon, montre-moi ce JSON pour ajuster."
+                )
+                st.json(st.session_state.sogefi_raw_debug)
+
+        if not dvf_df.empty:
+            # ── Taux de rendement estimé : loyer médian marché / prix d'achat ────
+            # Le loyer de marché vient des comparables déjà scrappés en session
+            # (onglet Analyse) — l'API DVF ne fournit aucune donnée locative,
+            # une transaction DVF est une VENTE, pas un bail.
+            _market_rents = []
+            for _r in st.session_state.get("live_results", []):
+                _v = to_num(_r.get("Loyer_HT_HC_eur_m2_an") or _r.get("Loyer_facial_eur_m2_an"))
+                if _v: _market_rents.append(_v)
+            _loyer_marche_m2 = (sorted(_market_rents)[len(_market_rents)//2]
+                                if _market_rents else None)  # médiane simple
+
+            if _loyer_marche_m2:
+                def _taux_rendement(row):
+                    prix_m2 = to_num(row.get("Prix/m²"))
+                    if prix_m2 and prix_m2 > 0:
+                        return round(_loyer_marche_m2 / prix_m2 * 100, 2)
+                    return None
+                dvf_df["Taux rendement estimé (%)"] = dvf_df.apply(_taux_rendement, axis=1)
+                st.caption(
+                    f"📐 Taux de rendement estimé = loyer médian de marché "
+                    f"({_loyer_marche_m2:,.0f} €/m²/an, calculé depuis les {len(_market_rents)} "
+                    f"comparables de l'onglet Analyse) ÷ prix d'achat/m². "
+                    f"Approximation brute, hors charges et fiscalité.".replace(",", "\u202f")
+                )
+            else:
+                st.info(
+                    "💡 Taux de rendement non calculable : lance d'abord une recherche de "
+                    "comparables (onglet Analyse) pour estimer un loyer de marché."
+                )
+
+            # ── Commentaire auto-généré (éditable) ───────────────────────────
+            def _dvf_comment(row):
+                parts = []
+                nat = row.get("Nature")
+                if nat and nat != "—": parts.append(str(nat))
+                d = row.get("Date")
+                if d and d != "—": parts.append(f"signée le {d}")
+                surf = row.get("Surface (m²)")
+                if surf: parts.append(f"{surf:.0f} m²" if isinstance(surf,(int,float)) else f"{surf} m²")
+                taux = row.get("Taux rendement estimé (%)")
+                if taux: parts.append(f"rendement estimé {taux:.1f}%")
+                return " · ".join(parts) if parts else "—"
+            dvf_df["Commentaire"] = dvf_df.apply(_dvf_comment, axis=1)
+
+            # Métriques de synthèse
+            stats = apis.dvf_summary(dvf_df)
+            if stats:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Transactions", stats["n"])
+                c2.metric("Prix médian /m²", f"{stats['median']:,.0f} €".replace(",", "\u202f"))
+                c3.metric("Prix min /m²",    f"{stats['min']:,.0f} €".replace(",", "\u202f"))
+                c4.metric("Prix max /m²",    f"{stats['max']:,.0f} €".replace(",", "\u202f"))
+
+            st.caption(
+                f"Q1 : {stats.get('q1',0):,.0f} € · Q3 : {stats.get('q3',0):,.0f} €".replace(",", "\u202f")
+                + f" · Moyenne : {stats.get('mean',0):,.0f} €/m²".replace(",", "\u202f")
+            )
+
+            # Tableau éditable — colonnes essentielles uniquement, ordre curé
+            st.subheader("Détail des transactions")
+            _priority_order = ["Date", "Type", "Nature", "Surface (m²)", "Adresse",
+                               "Commune", "Prix total (€)", "Prix/m²",
+                               "Taux rendement estimé (%)", "Commentaire"]
+            _visible_cols = [c for c in _priority_order if c in dvf_df.columns]
+            # ajoute toute colonne non-technique oubliée dans la liste ci-dessus
+            _visible_cols += [c for c in dvf_df.columns
+                              if not c.startswith("_") and c not in _visible_cols]
+            num_cols = ["Surface (m²)", "Prix total (€)", "Prix/m²", "Distance (m)",
+                        "Taux rendement estimé (%)"]
+            col_cfg = {c: st.column_config.NumberColumn(format="%.0f") for c in num_cols if c in dvf_df.columns}
+            if "Taux rendement estimé (%)" in dvf_df.columns:
+                col_cfg["Taux rendement estimé (%)"] = st.column_config.NumberColumn(format="%.2f %%")
+            dvf_df_edited = st.data_editor(
+                dvf_df[_visible_cols], use_container_width=True, hide_index=True,
+                column_config=col_cfg, key="dvf_editor",
+            )
+
+
+            # Carte DVF
+            st.subheader("Carte des transactions")
+            dvf_map = folium.Map(location=[t_lat, t_lon], zoom_start=14, tiles=None)
+            folium.TileLayer(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri", name="🛰️ Satellite", overlay=False, control=True
+            ).add_to(dvf_map)
+            folium.TileLayer(
+                "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                attr="CartoDB", name="🗺️ Plan", overlay=False, control=True
+            ).add_to(dvf_map)
+            folium.LayerControl(position="topright", collapsed=False).add_to(dvf_map)
+
+            folium.Marker([t_lat, t_lon], tooltip="🏢 Actif",
+                          icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(dvf_map)
+
+            for _, row in dvf_df.iterrows():
+                if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
+                    continue
+                px = row.get("Prix/m²")
+                popup_html = (
+                    f"<b>{row.get('Adresse','—')}, {row.get('Commune','')}</b><br>"
+                    f"Date : {row.get('Date','—')}<br>"
+                    f"Type : {row.get('Type','—')}<br>"
+                    f"Surface : {row.get('Surface (m²)','—')} m²<br>"
+                    f"<b>Prix : {str(round(px)) + ' €/m²' if px else '—'}</b>"
+                )
+                folium.CircleMarker(
+                    location=[float(row["_lat"]), float(row["_lon"])],
+                    radius=9, color="white", weight=1.5,
+                    fill=True, fill_color="#008493", fill_opacity=0.85,
+                    popup=folium.Popup(popup_html, max_width=240),
+                    tooltip=f"DVF — {str(round(px)) + ' €/m²' if px else 'prix inconnu'}",
+                ).add_to(dvf_map)
+
+            components.html(dvf_map._repr_html_(), height=480, scrolling=False)
+
+            # Export
+            st.download_button(
+                "📥 Exporter les transactions DVF (CSV)",
+                dvf_df.drop(columns=["_lat","_lon"], errors="ignore")
+                      .to_csv(index=False).encode("utf-8"),
+                file_name="dvf_transactions.csv",
+                mime="text/csv",
+            )
+
+        # ══════════════════════════════════════════════════════════════════
+        # Cartographie exhaustive de la commune (clustering, gratuit)
+        # ══════════════════════════════════════════════════════════════════
+        if not dvf_commune_df.empty:
+            st.divider()
+            st.subheader(f"🗺️ Toutes les transactions — {search_commune_dvf}")
+            st.caption(
+                f"{len(dvf_commune_df)} transaction(s) affichée(s), regroupées "
+                f"automatiquement selon le niveau de zoom (clustering). "
+                f"Couleur du cercle = tranche de prix/m²."
+            )
+
+            from folium.plugins import MarkerCluster
+
+            # Centre = moyenne des points valides (pas le point de recherche,
+            # pour bien centrer sur l'ensemble de la commune)
+            _valid_pts = dvf_commune_df[
+                dvf_commune_df["_lat"].apply(_valid_coord)
+                & dvf_commune_df["_lon"].apply(_valid_coord)
+            ]
+            if not _valid_pts.empty:
+                _center_lat = _valid_pts["_lat"].astype(float).mean()
+                _center_lon = _valid_pts["_lon"].astype(float).mean()
+            else:
+                _center_lat, _center_lon = t_lat, t_lon
+
+            commune_map = folium.Map(location=[_center_lat, _center_lon], zoom_start=13, tiles=None)
+            folium.TileLayer(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri", name="🛰️ Satellite", overlay=False, control=True
+            ).add_to(commune_map)
+            folium.TileLayer(
+                "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                attr="CartoDB", name="🗺️ Plan", overlay=False, control=True
+            ).add_to(commune_map)
+            folium.LayerControl(position="topright", collapsed=False).add_to(commune_map)
+
+            folium.Marker([t_lat, t_lon], tooltip="🏢 Actif de référence",
+                          icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(commune_map)
+
+            cluster = MarkerCluster(name="Transactions DVF").add_to(commune_map)
+
+            # Seuils de couleur par tranche de prix/m² (quartiles de la commune)
+            _prix_valides = dvf_commune_df["Prix/m²"].dropna()
+            if len(_prix_valides) >= 4:
+                _q1, _q2, _q3 = _prix_valides.quantile([0.25, 0.5, 0.75])
+            else:
+                _q1 = _q2 = _q3 = None
+
+            def _couleur_prix(px):
+                if px is None or _q1 is None:
+                    return "#8A93A3"
+                if px <= _q1: return "#16A34A"
+                if px <= _q2: return "#F39C12"
+                if px <= _q3: return "#E67E22"
+                return "#DC2626"
+
+            for _, row in dvf_commune_df.iterrows():
+                if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
+                    continue
+                px = row.get("Prix/m²")
+                popup_html = (
+                    f"<b>{row.get('Adresse','—')}</b><br>"
+                    f"Date : {row.get('Date','—')}<br>"
+                    f"Type : {row.get('Type','—')}<br>"
+                    f"Surface : {row.get('Surface (m²)','—')} m²<br>"
+                    f"<b>{f'{px:,.0f} €/m²'.replace(',', chr(8239)) if px else 'Prix inconnu'}</b>"
+                )
+                folium.CircleMarker(
+                    location=[float(row["_lat"]), float(row["_lon"])],
+                    radius=6, color="white", weight=1,
+                    fill=True, fill_color=_couleur_prix(px), fill_opacity=0.85,
+                    popup=folium.Popup(popup_html, max_width=220),
+                    tooltip=f"{px:,.0f} €/m²".replace(",", "\u202f") if px else "Prix inconnu",
+                ).add_to(cluster)
+
+            components.html(commune_map._repr_html_(), height=600, scrolling=False)
+            if _q1 is not None:
+                st.caption(
+                    f"🟢 ≤ {_q1:,.0f} €/m² · 🟠 ≤ {_q2:,.0f} €/m² · "
+                    f"🟧 ≤ {_q3:,.0f} €/m² · 🔴 > {_q3:,.0f} €/m²".replace(",", "\u202f")
+                )
+
+            st.download_button(
+                "📥 Exporter toutes les transactions de la commune (CSV)",
+                dvf_commune_df.drop(columns=["_lat","_lon"], errors="ignore")
+                             .to_csv(index=False).encode("utf-8"),
+                file_name=f"dvf_{search_commune_dvf.lower().replace(' ','_')}_complet.csv",
+                mime="text/csv",
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 5 — Targomo : isochrones de déplacement
+# ══════════════════════════════════════════════════════════════════════════
+with tab_targomo:
+    st.subheader("🎯 Isochrones Targomo — Zones accessibles par mode de transport")
+    st.caption(
+        "Affiche les zones atteignables depuis l'actif en N minutes selon le mode de transport. "
+        "Nécessite une clé API Targomo gratuite — inscription sur "
+        "[targomo.com/developers](https://targomo.com/developers/)."
+    )
+
+    if not target:
+        st.info("Renseigne l'adresse de l'actif (section 1) pour calculer les isochrones.")
+    elif not targomo_key:
+        st.warning(
+            "Renseigne ta clé API Targomo dans la section 4 de la barre latérale. "
+            "La clé gratuite ('Free tier') permet jusqu'à 1 000 requêtes/mois."
+        )
+    else:
+        if "targomo_results" not in st.session_state:
+            st.session_state.targomo_results = {}
+
+        if run_targomo:
+            for mode in (targomo_modes or ["walk"]):
+                with st.spinner(f"Calcul isochrones — {apis.TRAVEL_MODES.get(mode, mode)}…"):
+                    result = apis.fetch_isochrones(
+                        lat=t_lat, lon=t_lon,
+                        api_key=targomo_key,
+                        times_minutes=sorted(targomo_times or [5, 10, 15]),
+                        mode=mode,
+                    )
+                    if result and "error" in result:
+                        st.error(f"Erreur Targomo ({mode}): {result['error']}")
+                    else:
+                        st.session_state.targomo_results[mode] = result
+                        st.success(f"✅ Isochrones calculées — {apis.TRAVEL_MODES.get(mode, mode)}")
+                time.sleep(0.3)
+
+        results = st.session_state.targomo_results
+        if results:
+            # ── Carte fusionnée : mêmes comparables que l'onglet Carte + isochrones ──
+            field_for_map_targomo = (
+                "Prix_vente_eur_m2" if op == "Vente"
+                else "Loyer_HT_HC_eur_m2_an" if "Loyer_HT_HC_eur_m2_an" in df.columns
+                else "Loyer_facial_eur_m2_an"
+            )
+            bounds_for_map_targomo = (
+                (live_search.PRIX_M2_MIN, live_search.PRIX_M2_MAX) if op == "Vente"
+                else (live_search.LOYER_M2_AN_MIN, live_search.LOYER_M2_AN_MAX)
+            )
+            _map_source_df = res if not res.empty else df
+
+            iso_map = make_map(t_lat, t_lon, t_label, _map_source_df,
+                              field_for_map_targomo, bounds_for_map_targomo)
+
+            # Ajout des isochrones sur la même carte que les comparables
+            for mode, geojson_data in results.items():
+                if geojson_data and "error" not in geojson_data:
+                    apis.add_isochrones_to_map(
+                        iso_map, geojson_data,
+                        times_minutes=sorted(targomo_times or [5, 10, 15]),
+                        mode=mode,
+                    )
+
+            components.html(iso_map._repr_html_(), height=680, scrolling=False)
+            st.caption(
+                "🔴 Actif · 🟢 Neuf · 🔵 Restructuré · 🟠 Seconde main · ⚫ Inconnu · "
+                "Zones colorées = isochrones (temps de trajet)"
+            )
+
+            # Tableau de lisibilité des temps
+            st.subheader("📏 Lecture des isochrones")
+            for mode in results:
+                st.markdown(f"**{apis.TRAVEL_MODES.get(mode, mode)}**")
+                for t in sorted(targomo_times or [5, 10, 15]):
+                    color = apis.TARGOMO_COLORS.get(
+                        min(apis.TARGOMO_COLORS.keys(), key=lambda x: abs(x - t)), "#888")
+                    st.markdown(
+                        f"<span style='color:{color};font-size:18px'>●</span> "
+                        f"Zone accessible en **{t} min** à {apis.TRAVEL_MODES.get(mode,mode)}",
+                        unsafe_allow_html=True
+                    )
+        else:
+            st.info("Clique sur 'Calculer les isochrones' dans la section 4 de la barre latérale.")
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONGLET 6 — Urbanisme : PLU, cadastre, risques de l'actif cible + comparables
+# ══════════════════════════════════════════════════════════════════════════
+with tab_urba:
+    st.subheader("📋 Urbanisme & réglementaire")
+    st.caption(
+        "Zone PLU (Géoportail de l'Urbanisme), référence cadastrale (IGN) et "
+        "risques (Géorisques) — données publiques gratuites, sans clé API."
+    )
+
+    if not target:
+        st.info("Renseigne l'adresse de l'actif (section 1) pour charger les données d'urbanisme.")
+    else:
+        # ── Actif cible ──────────────────────────────────────────────────
+        st.markdown("### 🏢 Actif cible")
+        with st.spinner("Interrogation PLU / Cadastre / Géorisques…"):
+            plu_target = apis.fetch_plu_zone(t_lat, t_lon)
+            cad_target = apis.fetch_cadastre_info(t_lat, t_lon)
+            risques_target = apis.fetch_georisques(t_lat, t_lon)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**🏙️ Zone PLU**")
+            if plu_target:
+                zone = plu_target.get("zone_type", "—")
+                color = apis.PLU_ZONE_COLORS.get(zone[:1] if zone else "", "#666")
+                st.markdown(
+                    f"<span style='font-size:24px;font-weight:700;color:{color}'>{zone or '—'}</span>",
+                    unsafe_allow_html=True)
+                st.caption(plu_target.get("zone_description", "") or plu_target.get("zone_libelle", ""))
+                if plu_target.get("libelong"):
+                    st.caption(f"_{plu_target['libelong']}_")
+            else:
+                st.caption("Zone PLU non trouvée pour ce point. "
+                           "Le PLU de la commune n'est peut-être pas encore numérisé sur le GPU.")
+        with c2:
+            st.markdown("**📐 Cadastre**")
+            if cad_target:
+                st.markdown(f"**{cad_target.get('ref_cadastrale', '—')}**")
+                st.caption(f"Section {cad_target.get('section','—')} · "
+                           f"Parcelle {cad_target.get('numero','—')}")
+                _cont = _safe_int(cad_target.get("contenance"))
+                if _cont is not None:
+                    st.caption(f"Contenance : {_cont:,} m²".replace(",", "\u202f"))
+            else:
+                st.caption("Parcelle non identifiée à ces coordonnées.")
+        with c3:
+            st.markdown("**⚠️ Risques**")
+            if risques_target:
+                for _, info in risques_target.items():
+                    st.caption(f"• {info.get('label', '')}")
+            else:
+                st.caption("Aucun indicateur de risque retourné (ou API indisponible).")
+
+        # ── Comparables : synthèse PLU ────────────────────────────────────
+        st.divider()
+        st.markdown("### 📊 Zones PLU des comparables")
+        if res.empty or "PLU_zone" not in res.columns:
+            st.info("Lance d'abord une recherche de comparables — les zones PLU sont "
+                     "récupérées automatiquement pour chaque adresse géocodée.")
+        else:
+            plu_series = res["PLU_zone"].fillna("").replace("", "Non déterminé")
+            plu_counts = plu_series.value_counts()
+
+            cc1, cc2 = st.columns([1, 2])
+            with cc1:
+                st.markdown("**Répartition**")
+                for zone, count in plu_counts.items():
+                    color = apis.PLU_ZONE_COLORS.get(str(zone)[:1], "#666")
+                    st.markdown(
+                        f"<span style='color:{color};font-weight:700'>{zone}</span> : {count} comp.",
+                        unsafe_allow_html=True)
+            with cc2:
+                st.markdown("**Détail par comparable**")
+                cols_urba = [c for c in ["Adresse", "Commune", "PLU_zone", "PLU_desc",
+                                          "Cadastre_ref", "Cadastre_contenance"] if c in res.columns]
+                if cols_urba:
+                    disp_urba = res[cols_urba].copy().rename(columns={
+                        "PLU_zone": "Zone PLU", "PLU_desc": "Description",
+                        "Cadastre_ref": "Réf. cadastrale",
+                        "Cadastre_contenance": "Parcelle (m²)",
+                    })
+                    st.dataframe(disp_urba, use_container_width=True, hide_index=True)
+
+            # Note méthodologique
+            st.caption(
+                "💡 La zone PLU influence directement la valeur : un comparable en zone UE "
+                "(économique) n'est pas strictement comparable à un actif en zone UC (centre-ville). "
+                "Vérifie la cohérence des zones avant de valider la fourchette de valorisation."
+            )
