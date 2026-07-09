@@ -1346,7 +1346,7 @@ with _bcol1:
         unsafe_allow_html=True,
     )
 with _bcol2:
-    if st.button("💾 Sauvegarder", use_container_width=True):
+    if st.button("💾 Sauvegarde", use_container_width=True):
         ok = dossiers.save_dossier_data(
             st.session_state.active_dossier_id,
             dossiers.snapshot_session_state(st.session_state),
