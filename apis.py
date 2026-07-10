@@ -63,6 +63,7 @@ def _post(url: str, payload: dict, timeout: int = 20,
 # Déjà utilisé dans app.py, mais exposé ici pour enrichir les comparables
 # ══════════════════════════════════════════════════════════════════════════════
 
+@lru_cache(maxsize=512)
 def geocode_address(address: str) -> dict | None:
     """
     Géocode une adresse française via l'API BAN (gratuite, sans clé).
@@ -366,20 +367,13 @@ LOCAL_TERTIAIRE = {
 }
 
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
-
-# Cache manuel : on ne veut mémoriser QUE les succès. @lru_cache mettait en
-# cache les None d'un échec réseau transitoire, ce qui « gelait » ensuite la
-# commune sur un résultat vide jusqu'au redémarrage du serveur.
-_DVF_CACHE: dict[str, pd.DataFrame] = {}
-
-
-DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
 DVF_YEARS = ("2025", "2024", "2023", "2022", "2021")  # profondeur d'historique — ajuster si besoin
 
 
 @lru_cache(maxsize=32)
 def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
     # Structure data.gouv actuelle : {base}/{année}/communes/{dept}/{code_insee}.csv
+    # On fusionne plusieurs millésimes pour la profondeur d'historique.
     dept = code_insee[:2]
     frames = []
     for year in DVF_YEARS:
@@ -387,7 +381,7 @@ def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
         try:
             r = requests.get(url, timeout=30, headers=_H)
             if r.status_code == 404:
-                continue
+                continue  # pas de mutations cette année pour cette commune
             r.raise_for_status()
             frames.append(pd.read_csv(io.StringIO(r.text), sep=",", dtype=str, low_memory=False))
         except Exception as e:
@@ -397,6 +391,7 @@ def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
         return None
     return pd.concat(frames, ignore_index=True)
 
+
 def _to_float(v) -> float | None:
     try:
         return float(str(v).replace(",", ".").replace(" ", ""))
@@ -404,37 +399,11 @@ def _to_float(v) -> float | None:
         return None
 
 
-@lru_cache(maxsize=256)
-def resolve_insee(commune: str, lat: float | None = None, lon: float | None = None) -> str | None:
-    """Résout le code INSEE d'une commune.
-
-    1) table locale COMMUNE_INSEE (rapide, Nantes métropole) ;
-    2) sinon interrogation BAN : d'abord par coordonnées (reverse), le plus
-       fiable ; à défaut par nom de commune. La BAN renvoie `citycode` = INSEE.
-
-    Corrige le bug où toute commune hors table (Rennes, Bordeaux…) retombait
-    silencieusement sur Nantes (44109) → DVF interrogeait la mauvaise ville.
-    """
-    if commune in COMMUNE_INSEE:
-        return COMMUNE_INSEE[commune]
-    # reverse géo par coordonnées si dispo (plus robuste que le nom)
-    if lat is not None and lon is not None:
-        data = _get("https://api-adresse.data.gouv.fr/reverse/",
-                    params={"lat": lat, "lon": lon, "limit": 1})
-        feats = (data or {}).get("features", [])
-        if feats:
-            code = feats[0].get("properties", {}).get("citycode")
-            if code:
-                return code
-    # repli : recherche par nom
-    if commune:
-        data = _get("https://api-adresse.data.gouv.fr/search/",
-                    params={"q": commune, "type": "municipality", "limit": 1})
-        feats = (data or {}).get("features", [])
-        if feats:
-            code = feats[0].get("properties", {}).get("citycode")
-            if code:
-                return code
+def _dvf_prix_m2(prix_total, surface_m2):
+    """Prix au m² robuste aux NaN. round(NaN/x) lève 'cannot convert float
+    NaN to integer' car NaN est truthy en Python — d'où le test pd.notna."""
+    if pd.notna(prix_total) and pd.notna(surface_m2) and surface_m2 > 0:
+        return round(prix_total / surface_m2)
     return None
 
 
@@ -445,7 +414,7 @@ def get_dvf_transactions(
 ) -> pd.DataFrame:
     if types_locaux is None:
         types_locaux = LOCAL_TERTIAIRE
-    code = resolve_insee(commune, lat, lon) or COMMUNE_INSEE.get(commune, "44109")
+    code = COMMUNE_INSEE.get(commune, "44109")
     raw  = download_dvf_commune(code)
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -482,9 +451,7 @@ def get_dvf_transactions(
 
     df["prix_total"] = df["valeur_fonciere"].apply(_to_float)
     df["surface_m2"] = df["surface_reelle_bati"].apply(_to_float)
-    df["prix_m2"]    = df.apply(lambda r: round(r["prix_total"]/r["surface_m2"])
-                                if r["prix_total"] and r["surface_m2"] and r["surface_m2"]>0
-                                else None, axis=1)
+    df["prix_m2"]    = df.apply(lambda r: _dvf_prix_m2(r["prix_total"], r["surface_m2"]), axis=1)
     df["adresse"]    = (df.get("adresse_numero",pd.Series(dtype=str)).fillna("")
                         + " " + df.get("adresse_nom_voie",pd.Series(dtype=str)).fillna("")
                         ).str.strip()
@@ -521,7 +488,7 @@ def get_dvf_commune_complete(
     """
     if types_locaux is None:
         types_locaux = LOCAL_TERTIAIRE
-    code = resolve_insee(commune, ref_lat, ref_lon) or COMMUNE_INSEE.get(commune, "44109")
+    code = COMMUNE_INSEE.get(commune, "44109")
     raw  = download_dvf_commune(code)
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -547,9 +514,7 @@ def get_dvf_commune_complete(
 
     df["prix_total"] = df["valeur_fonciere"].apply(_to_float)
     df["surface_m2"] = df["surface_reelle_bati"].apply(_to_float)
-    df["prix_m2"]    = df.apply(lambda r: round(r["prix_total"]/r["surface_m2"])
-                                if r["prix_total"] and r["surface_m2"] and r["surface_m2"]>0
-                                else None, axis=1)
+    df["prix_m2"]    = df.apply(lambda r: _dvf_prix_m2(r["prix_total"], r["surface_m2"]), axis=1)
     df["adresse"]    = (df.get("adresse_numero",pd.Series(dtype=str)).fillna("")
                         + " " + df.get("adresse_nom_voie",pd.Series(dtype=str)).fillna("")
                         ).str.strip()
@@ -815,28 +780,21 @@ def fetch_isochrones(lat: float, lon: float, api_key: str,
     if times_minutes is None:
         times_minutes = [5, 10, 15]
 
-    # ⚠️ Targomo attend TOUTES les durées en SECONDES — aussi bien dans
-    # polygon.values que dans maxEdgeWeight. Passer des minutes ici produisait
-    # des polygones minuscules (15 s au lieu de 15 min) → « aucun résultat ».
-    times_seconds = sorted((int(t) * 60 for t in times_minutes), reverse=True)
-
     payload = {
         "sources": [{"id": "origin", "lat": lat, "lng": lon}],
         "polygon": {
-            "values":           times_seconds,
+            "values":           sorted(times_minutes, reverse=True),
             "intersectionMode": "union",
             "serializer":       "geojson",
             "decimalPrecision": 5,
         },
         "edgeWeight":    "time",
         "travelType":    mode,
-        "maxEdgeWeight": max(times_seconds),
+        "maxEdgeWeight": max(times_minutes) * 60,
     }
 
-    # La clé API Targomo passe en paramètre d'URL (?key=…), pas en en-tête.
-    # L'en-tête X-Api-Key est conservé en complément par sécurité (ignoré si inutile).
     result = _post(
-        f"{TARGOMO_ENDPOINT}?key={api_key}",
+        TARGOMO_ENDPOINT,
         payload=payload,
         headers={"X-Api-Key": api_key},
         timeout=25,
@@ -851,8 +809,6 @@ def fetch_isochrones(lat: float, lon: float, api_key: str,
         return {"data": result}
     if "message" in result:
         return {"error": result["message"]}
-    if "error" in result:
-        return {"error": str(result["error"])[:200]}
     return {"error": str(result)[:200]}
 
 
