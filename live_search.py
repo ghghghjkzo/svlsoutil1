@@ -15,7 +15,6 @@ ATTENTION — lire avant usage :
 import re
 import time
 import unicodedata
-from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,7 +24,9 @@ HEADERS = {
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Pas d'Accept-Encoding forcé : on laisse requests négocier et décompresser
+    # automatiquement. Forcer "br" (brotli) cassait le décodage en streaming et
+    # renvoyait une page tronquée/vide (BureauxLocaux, Geolocaux).
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -45,40 +46,31 @@ LAST_DEBUG_BLOCKS: list[str] = []
 # €  optionnel (tableau des étages sans symbole). \s* partout : l'extraction HTML
 # produit souvent des espaces MULTIPLES entre fragments de balises éclatées, que
 # \s? (un seul espace) ne capturait pas → cause racine des prix non reconnus.
-# Fragments réutilisables — tolèrent les variantes réelles des annonces :
-#   • monnaie : « € », « EUR », « euros » (ou rien du tout)
-#   • unité de surface : « m² », « m2 », « M2 » (extraction HTML éclatée)
-#   • « HT-HC » peut apparaître AVANT ou APRÈS « /m²/an » selon les sites
-_CUR = r"(?:€|eur(?:os?)?)?"          # symbole monétaire optionnel, € ou EUR
-_M2  = r"m\s*(?:²|2)"                  # m², m2, M 2…
-_HTHC = r"HT\s*[-/ ]?\s*HC"           # HT-HC, HT/HC, HTHC, HT HC
-
-# 1. Format HT-HC annuel /m² — HT-HC avant OU après « /m²/an »
-#    ex : "340 € HT-HC/m²/an"  ou  "180 €/m²/an HT-HC"
+# 1. Format explicite "340 € HT-HC/m²/an" ou "350 HT/HC/m²/an"
 LOYER_HTHC_M2_AN_RE = re.compile(
-    rf"(\d[\d\s]{{1,5}})\s*{_CUR}\s*(?:{_HTHC}\s*)?/\s*{_M2}\s*/\s*an(?:\s*{_HTHC})?", re.I)
-# 2. Format "180 € HT /m²/an" (HT seul, sans HC) ou nu "180 €/m²/an"
+    r"(\d[\d\s]{1,5})\s*€?\s*HT\s*[-/ ]?\s*HC\s*/\s*m²\s*/\s*an", re.I)
+# 2. Format "180 € HT /m²/an" (HT seul, sans HC)
 LOYER_ANNUEL_M2_RE = re.compile(
-    rf"(\d[\d\s]{{1,5}})\s*{_CUR}\s*(?:HT)?\s*/\s*{_M2}\s*/\s*an", re.I)
+    r"(\d[\d\s]{1,5})\s*€?\s*(?:HT)?\s*/\s*m²\s*/\s*an", re.I)
 # 3. Format mensuel explicitement HT-HC "9 152 € HT-HC/mois" → calculé en /m²/an
 LOYER_HTHC_MENSUEL_RE = re.compile(
-    rf"(\d[\d\s]{{1,7}})\s*{_CUR}\s*{_HTHC}\s*/\s*mois", re.I)
+    r"(\d[\d\s]{1,7})\s*€?\s*HT\s*[-/ ]?\s*HC\s*/\s*mois", re.I)
 # 4. Format mensuel générique "4 500 €/mois" (peut être HT ou TTC)
 LOYER_MENSUEL_RE = re.compile(
-    rf"(\d[\d\s]{{1,7}})\s*{_CUR}\s*(?:HT|TTC)?\s*(?:/|par)\s*mois", re.I)
+    r"(\d[\d\s]{1,7})\s*€?\s*(?:HT|TTC)?\s*(?:/|par)\s*mois", re.I)
 
-PRIX_TOTAL_RE = re.compile(rf"prix\s*:?\s*(\d[\d\s]{{3,9}})\s*{_CUR}", re.I)
+PRIX_TOTAL_RE = re.compile(r"prix\s*:?\s*(\d[\d\s]{3,9})\s?€", re.I)
 
 # ── Charges ──────────────────────────────────────────────────────────────────
 CHARGES_M2_RE = re.compile(
-    rf"charges?\s*:?\s*(?:d'environ\s*)?(\d[\d\s]{{0,4}})\s*{_CUR}\s*(?:HT)?\s*/\s*{_M2}\s*/\s*an", re.I)
+    r"charges?\s*:?\s*(?:d'environ\s*)?(\d[\d\s]{0,4})\s?€\s?(?:HT)?\s?/\s?m²\s?/\s?an", re.I)
 # "Charges locatives : 6 783 € HT/an" (format BureauxLocaux fiche détail)
 CHARGES_LOCATIVES_AN_RE = re.compile(
-    rf"charges?\s+locatives?\s*:?\s*(\d[\d\s]{{0,6}})\s*{_CUR}\s*(?:HT)?\s*/?\s*an", re.I)
+    r"charges?\s+locatives?\s*:?\s*(\d[\d\s]{0,6})\s?€\s?(?:HT)?\s?/?\s?an", re.I)
 CHARGES_MENSUEL_RE = re.compile(
-    rf"(?:provisions?\s+pour\s+)?charges?\s*:?\s*(\d[\d\s]{{0,6}})\s*{_CUR}\s*(?:HT|TTC)?\s*(?:/|par)\s*mois", re.I)
+    r"(?:provisions?\s+pour\s+)?charges?\s*:?\s*(\d[\d\s]{0,6})\s?€?\s?(?:HT|TTC)?\s?(?:/|par)\s?mois", re.I)
 CHARGES_ANNUEL_RE = re.compile(
-    rf"(?:provisions?\s+pour\s+)?charges?\s*:?\s*(\d[\d\s]{{0,6}})\s*{_CUR}\s*(?:HT|TTC)?\s*(?:/|par)\s*an", re.I)
+    r"(?:provisions?\s+pour\s+)?charges?\s*:?\s*(\d[\d\s]{0,6})\s?€?\s?(?:HT|TTC)?\s?(?:/|par)\s?an", re.I)
 
 # "charges incluses" / "tout compris" → loyer affiché = déjà HT/HC
 ALL_INCLUSIVE_RE = re.compile(
@@ -107,34 +99,21 @@ COMMUNES_PERIMETRE = [
 _commune_alt = "|".join(re.escape(c) for c in COMMUNES_PERIMETRE)
 COMMUNE_RE = re.compile(r"\b(" + _commune_alt + r")\b")
 
-# Nom de commune GÉNÉRIQUE (toute la France, pas seulement Nantes Métropole) :
-# une suite de mots à initiale majuscule OU particule (de/la/le/sur/les/saint…),
-# tirets et apostrophes autorisés. Utilisé après un code postal (ancre fiable).
-# On borne volontairement à des tokens « type nom de commune » pour ne pas
-# happer le texte descriptif qui suit (« Bureaux à louer », « centre ville »…).
-_COMMUNE_TOKEN = r"(?:[A-ZÀ-Ý][A-Za-zÀ-ÿ'’]+|d'|l'|de|du|des|la|le|les|sur|sous|en|lès|los|aux|Saint|Sainte|St|Ste)"
-_COMMUNE_GENERIC = _COMMUNE_TOKEN + r"(?:[ \-]" + _COMMUNE_TOKEN + r"){0,4}"
-
 VOIE_TYPES = (r"Rue|Boulevard|Bd|Avenue|Av|All[ée]e|Quai|Place|Mail|Chemin|Route|Impasse|"
               r"Cours|Square|Esplanade|Cit[ée]|Passage|Rond-?point|Voie")
 
-# Numéro de voie : 1 à 4 chiffres, éventuellement « bis/ter/quater » ou une
-# lettre (12B) ou un intervalle collé (12-14). PAS de chiffres séparés par des
-# espaces (évite de happer le « 2 » de « 250 m2 » qui précède l'adresse).
-_NUM_VOIE = r"\d{1,4}(?:\s?(?:bis|ter|quater)|[A-Da-d]|-\d{1,4})?"
-
-# Adresse — tentative 1 (la plus fiable) : numéro + type de voie + nom, code postal, commune (France entière)
+# Adresse — tentative 1 (la plus fiable) : numéro + type de voie + nom, code postal, commune connue
 ADDRESS_RE = re.compile(
-    r"(" + _NUM_VOIE + r"\s+(?:" + VOIE_TYPES + r")\s+[^,\d]{2,55}?)\s*,?\s*(\d{5})\s+(" + _COMMUNE_GENERIC + r")",
+    r"(\d+[\d\-\s]*\s+(?:" + VOIE_TYPES + r")\s+[^,\d]{2,55}?)\s*,?\s*(\d{5})\s+(" + _commune_alt + r")\b",
     re.I,
 )
-# Adresse — tentative 2 (repli) : pas de numéro de rue, mais type de voie + nom + CP + commune (France entière)
+# Adresse — tentative 2 (repli) : pas de numéro de rue, mais type de voie + nom + CP + commune
 ADDRESS_NO_NUM_RE = re.compile(
-    r"((?:" + VOIE_TYPES + r")\s+[^,\d]{2,55}?)\s*,?\s*(\d{5})\s+(" + _COMMUNE_GENERIC + r")",
+    r"((?:" + VOIE_TYPES + r")\s+[^,\d]{2,55}?)\s*,?\s*(\d{5})\s+(" + _commune_alt + r")\b",
     re.I,
 )
-# Adresse — tentative 3 (dernier repli) : juste CP + commune (France entière), sans nom de voie
-CP_COMMUNE_RE = re.compile(r"\b(\d{5})\s+(" + _COMMUNE_GENERIC + r")")
+# Adresse — tentative 3 (dernier repli) : juste CP + commune connue, sans nom de voie
+CP_COMMUNE_RE = re.compile(r"\b(\d{5})\s+(" + _commune_alt + r")\b", re.I)
 
 OP_TYPE_RE = re.compile(
     r"\b(Vente|Location)\s+(Bureaux?|Entrep[oô]ts?|Locaux?\s+d'activit[ée]s?|"
@@ -203,25 +182,17 @@ def slugify(s: str) -> str:
     return s
 
 
-def fetch(url: str, timeout: int = 12, max_bytes: int = 2_000_000) -> str | None:
-    """Récupère une page. Plafonne la taille téléchargée à max_bytes (~2 Mo)
-    pour éviter qu'une page anormalement lourde sature la RAM (crash OOM sur
-    Render 512 Mo). Une fiche d'annonce normale pèse quelques centaines de Ko."""
+def fetch(url: str, timeout: int = 12, max_bytes: int = 5_000_000) -> str | None:
+    """Récupère une page HTML. Plafonne la taille à max_bytes pour éviter qu'une
+    page anormalement lourde sature la RAM. requests gère seul la décompression
+    (gzip/deflate/br) : on lit r.content puis on décode, ce qui est fiable —
+    contrairement à un décodage manuel en streaming qui corrompait le brotli."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout, stream=True)
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
-        r.encoding = r.encoding or r.apparent_encoding or "utf-8"
-        chunks = []
-        total = 0
-        for chunk in r.iter_content(chunk_size=16384, decode_unicode=True):
-            if not chunk:
-                continue
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= max_bytes:
-                break  # on coupe : la partie utile (photos, prix) est en haut de page
-        r.close()
-        return "".join(chunks)
+        content = r.content[:max_bytes]  # bornage mémoire après décompression requests
+        encoding = r.encoding or r.apparent_encoding or "utf-8"
+        return content.decode(encoding, errors="replace")
     except requests.RequestException as e:
         print(f"[live_search] échec requête {url} : {e}")
         return None
@@ -249,36 +220,6 @@ def _clean_int(s: str) -> float | None:
         return float(cleaned)
     except (ValueError, TypeError):
         return None
-
-
-# Mots descriptifs immobiliers qui suivent parfois le nom de commune dans le
-# texte scrapé et polluent l'extraction (« 44000 Nantes Bureaux à louer »).
-# On tronque le nom de commande au premier de ces tokens.
-_COMMUNE_STOP_WORDS = {
-    "bureaux", "bureau", "local", "locaux", "commerce", "commerces", "entrepot",
-    "entrepôt", "entrepots", "entrepôts", "activités", "activites", "métropole",
-    "metropole", "centre", "ville", "proche", "idéal", "ideal", "à", "a", "au",
-    "location", "vente", "louer", "vendre", "quartier", "secteur", "zone", "parc",
-    "immeuble", "plateau", "surface", "surfaces", "m²", "m2", "€", "eur",
-}
-
-
-def _clean_commune(name: str) -> str:
-    """Tronque un nom de commune sur-capturé au premier mot descriptif.
-    « Nantes Bureaux à louer proche » → « Nantes ». Conserve les vraies
-    communes composées (« Saint-Herblain », « Aix-en-Provence »)."""
-    if not name:
-        return name
-    tokens = name.strip().split()
-    kept = []
-    for i, tok in enumerate(tokens):
-        base = tok.strip(",.;:").lower()
-        # un token de liaison (de, la, sur, les…) n'est jamais un stop-word ici
-        if base in _COMMUNE_STOP_WORDS and i > 0:
-            break
-        kept.append(tok)
-    cleaned = " ".join(kept).strip(" ,.-")
-    return cleaned or name.strip()
 
 
 def _extract_href(tag, base_url: str, search_url: str) -> str | None:
@@ -529,18 +470,18 @@ def parse_listing_block(block: str, source_name: str, source_url: str,
     addr_m = ADDRESS_RE.search(block)
     if addr_m:
         adresse = addr_m.group(1).strip().rstrip(",")
-        code_postal, commune = addr_m.group(2), _clean_commune(addr_m.group(3))
+        code_postal, commune = addr_m.group(2), addr_m.group(3)
         adresse_precise = True
     else:
         addr_m2 = ADDRESS_NO_NUM_RE.search(block)
         if addr_m2:
             adresse = addr_m2.group(1).strip().rstrip(",")
-            code_postal, commune = addr_m2.group(2), _clean_commune(addr_m2.group(3))
+            code_postal, commune = addr_m2.group(2), addr_m2.group(3)
             adresse_precise = True
         else:
             cp_com_m = CP_COMMUNE_RE.search(block)
             if cp_com_m:
-                code_postal, commune = cp_com_m.group(1), _clean_commune(cp_com_m.group(2))
+                code_postal, commune = cp_com_m.group(1), cp_com_m.group(2)
                 adresse = f"{commune} (adresse précise non extraite)"
             else:
                 com_m = COMMUNE_RE.search(block)
