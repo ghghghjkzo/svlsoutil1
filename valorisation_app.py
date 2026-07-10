@@ -1213,15 +1213,25 @@ def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comp
             elif col in FMT_EUR and isinstance(val,(int,float)): c.number_format="#,##0 €"
         ws.row_dimensions[r].height = 75
         if photo_j:
-            img_bytes = _download_photo(str(row_.get("Photo","") or ""))
+            photo_url = str(row_.get("Photo","") or "")
+            img_bytes = _download_photo(photo_url)
             if img_bytes:
                 try:
                     with tempfile.NamedTemporaryFile(suffix=".jpg",delete=False) as tmp:
                         tmp.write(img_bytes); tp = tmp.name
                     xi = XLImage(tp); xi.width,xi.height = 110,70
                     ws.add_image(xi,f"{gcl(photo_j)}{r}"); tmp_files.append(tp)
-                except Exception: pass
-
+                except Exception:
+                    if photo_url.startswith("http"):
+                        pc = ws.cell(r, photo_j)
+                        pc.hyperlink = photo_url; pc.value = "📷 Voir"
+                        pc.font = Font(name="Calibri", size=10, color=C_LINK, underline="single")
+                        pc.alignment = CTR
+            elif photo_url.startswith("http"):
+                pc = ws.cell(r, photo_j)
+                pc.hyperlink = photo_url; pc.value = "📷 Voir"
+                pc.font = Font(name="Calibri", size=10, color=C_LINK, underline="single")
+                pc.alignment = CTR
     ws.freeze_panes = "A4"
 
     # Onglet Synthèse
