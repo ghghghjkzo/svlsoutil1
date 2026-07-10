@@ -26,7 +26,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 import live_search
 import apis
@@ -1097,8 +1096,8 @@ def _download_photo(url: str, timeout: int = 6) -> bytes | None:
     """Télécharge une photo pour l'intégrer dans l'Excel. Retourne None en cas d'échec.
     Envoie des headers navigateur + un Referer dérivé du domaine de l'image : cela
     débloque les CDN qui vérifient l'origine (Geolocaux, etc.). Certains CDN restent
-    verrouillés par signature d'URL (BureauxLocaux) — on renvoie None proprement et
-    l'export continue sans cette photo."""
+    verrouillés par signature d'URL (BureauxLocaux) — dans ce cas on renvoie None
+    proprement et l'export continue sans cette photo."""
     if not url or not url.startswith("http"):
         return None
     try:
@@ -1118,6 +1117,8 @@ def _download_photo(url: str, timeout: int = 6) -> bytes | None:
     except Exception:
         pass
     return None
+
+
 def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comparables",
                           operation: str = "Location") -> bytes:
     """Export Excel professionnel charte Savills avec sections visuelles."""
@@ -1222,16 +1223,20 @@ def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comp
                     xi = XLImage(tp); xi.width,xi.height = 110,70
                     ws.add_image(xi,f"{gcl(photo_j)}{r}"); tmp_files.append(tp)
                 except Exception:
+                    # échec insertion image → repli lien si URL exploitable
                     if photo_url.startswith("http"):
                         pc = ws.cell(r, photo_j)
                         pc.hyperlink = photo_url; pc.value = "📷 Voir"
                         pc.font = Font(name="Calibri", size=10, color=C_LINK, underline="single")
                         pc.alignment = CTR
             elif photo_url.startswith("http"):
+                # image non téléchargeable (CDN verrouillé, ex. BureauxLocaux) :
+                # on met un lien cliquable vers la photo plutôt qu'une cellule vide
                 pc = ws.cell(r, photo_j)
                 pc.hyperlink = photo_url; pc.value = "📷 Voir"
                 pc.font = Font(name="Calibri", size=10, color=C_LINK, underline="single")
                 pc.alignment = CTR
+
     ws.freeze_panes = "A4"
 
     # Onglet Synthèse
@@ -1718,10 +1723,7 @@ else:
                 st.warning(f"**Filtre trop strict.** {diag['geocodable']} annonces sont "
                             f"géocodables mais sans prix associé, ou inversement. "
                             f"**Décoche « Ne garder que les annonces complètes ».**")
-            # Pas de st.stop() : le scan n'a rien donné, mais les onglets DVF et
-            # Targomo (qui ne dépendent que de l'adresse cible) doivent rester
-            # utilisables. On continue avec live_results vide, toléré en aval.
-            st.session_state.live_results = []
+            st.stop()
         else:
             n_raw = len(merged)
             msg = f"✅ {len(filtered)} annonce(s) retenue(s) sur {search_commune}"
@@ -1729,15 +1731,8 @@ else:
                 msg += f" ({n_raw - len(filtered)} écartée(s) — adresse ou prix manquant)"
             st.success(msg)
     if not st.session_state.live_results:
-        # ⚠️ NE PAS st.stop() ici : les onglets DVF et Targomo ne dépendent que
-        # de l'adresse cible (target), pas des comparables scrapés. Un st.stop()
-        # empêchait ces onglets d'exister tant qu'aucun comparable n'était trouvé
-        # → « l'API et le système ne communiquent pas ». On continue avec un jeu
-        # de comparables vide ; les blocs en aval tolèrent déjà df/res vides.
-        st.info("Aucun comparable scrapé pour l'instant — lance la recherche en direct "
-                "dans la barre latérale. Les onglets DVF et Targomo restent utilisables "
-                "dès qu'une adresse cible est validée.")
-        st.session_state.live_results = []
+        st.info("Lance la recherche en direct dans la barre latérale.")
+        st.stop()
 
     # ── Enrichissement photos ────────────────────────────────────────────
     n_sans_photo = sum(1 for r in st.session_state.live_results if not r.get("Photo_url"))
@@ -1784,8 +1779,15 @@ else:
 
     df = pd.DataFrame(st.session_state.live_results)
     st.write(f"**{len(df)}** référence(s) retenue(s) (en direct, à valider).")
-    # Le tableau général complet (toutes infos + liens + photos + coordonnées)
-    # est affiché plus bas, APRÈS le géocodage, pour disposer de _lat/_lon.
+
+    # La vue simplifiée (avec Latitude/Longitude) est affichée PLUS BAS, après le
+    # géocodage — sinon les colonnes _lat/_lon n'existent pas encore et s'affichent
+    # vides. _prix_simple est défini ici car réutilisé à cet endroit.
+    def _prix_simple(row):
+        return (to_num(row.get("Loyer_HT_HC_eur_m2_an"))
+                or to_num(row.get("Loyer_facial_eur_m2_an"))
+                or to_num(row.get("Prix_vente_eur_m2")))
+
 
 if not target:
     st.warning("Renseigne et valide une adresse cible pour lancer l'analyse.")
@@ -1798,15 +1800,8 @@ radius_m = radius_km * 1000
 progress = st.progress(0.0, text="Géocodage des comparables…")
 lats, lons, dists = [], [], []
 for i, row_ in df.iterrows():
-    # 1) coordonnées déjà présentes ? On accepte plusieurs origines :
-    #    - _lat/_lon : posées par apis.enrich_comparable_with_geodata (étape amont)
-    #    - Latitude/Longitude : cas d'un import Excel avec colonnes explicites
-    lat = to_num(row_.get("_lat")) if "_lat" in df.columns else None
-    lon = to_num(row_.get("_lon")) if "_lon" in df.columns else None
-    if lat is None or lon is None:
-        lat = to_num(row_.get("Latitude"))
-        lon = to_num(row_.get("Longitude"))
-    # 2) toujours rien → géocodage BAN depuis l'adresse la plus précise possible
+    lat = to_num(row_.get("Latitude"))
+    lon = to_num(row_.get("Longitude"))
     if lat is None or lon is None:
         addr_val = str(row_.get("Adresse", "") or "")
         # n'inclure l'adresse que si elle contient vraiment une info de rue
@@ -1832,55 +1827,32 @@ progress.empty()
 
 df["_lat"], df["_lon"], df["_dist"] = lats, lons, dists
 
-# ── Tableau général complet (toutes les annonces, avant le split Neuf/SM) ──
-# Restauration du tableau détaillé : toutes les infos, coordonnées, la photo en
-# vignette ET un lien cliquable vers l'annonce. Affiché seulement en mode direct
-# quand des comparables existent.
-if st.session_state.get("live_results") and not df.empty:
-    st.markdown("#### 📋 Toutes les annonces scrapées")
-    _GEN_COLS = {
-        "Photo_url":              "Aperçu",
-        "Adresse":                "Adresse",
-        "Commune":                "Commune",
-        "Code_postal":            "CP",
-        "_lat":                   "Latitude",
-        "_lon":                   "Longitude",
-        "Type_actif":             "Type",
-        "Etat":                   "État",
-        "Surface_m2":             "Surface (m²)",
-        "Loyer_facial_eur_m2_an": "Loyer facial €/m²/an",
-        "Charges_eur_m2_an":      "Charges €/m²/an",
-        "Loyer_HT_HC_eur_m2_an":  "Loyer HT-HC €/m²/an",
-        "Prix_vente_eur_m2":      "Prix vente €/m²",
-        "Nb_parkings":            "Parkings",
-        "Date_transaction":       "Date",
-        "Source":                 "Source",
-        "Lien":                   "Annonce",
-        "Commentaire":            "Commentaire",
-    }
-    _avail_gen = {k: v for k, v in _GEN_COLS.items() if k in df.columns}
-    _gen_df = df[list(_avail_gen.keys())].copy().rename(columns=_avail_gen)
-    # colonne lien "Voir" cliquable dupliquée à partir de la photo (vignette + lien)
-    if "Aperçu" in _gen_df.columns:
-        _gen_df.insert(_gen_df.columns.get_loc("Aperçu") + 1, "Photo", _gen_df["Aperçu"])
+# ── Vue simplifiée (recherche en direct) : affichée ICI, après le géocodage,
+# pour que Latitude/Longitude soient renseignées. En mode upload Excel, les
+# coordonnées viennent déjà du fichier, donc pas besoin de cette vue.
+if mode != "Charger un fichier Excel" and not df.empty:
+    _simple_df = pd.DataFrame({
+        "Adresse":  df.get("Adresse", ""),
+        "Ville":    df.get("Commune", ""),
+        "Pays":     "France",
+        "Latitude": df.get("_lat"),
+        "Longitude": df.get("_lon"),
+        "Surface (m²)": df.get("Surface_m2"),
+        "Prix (€/m²)":  df.apply(_prix_simple, axis=1),
+    })
     st.dataframe(
-        _gen_df, use_container_width=True, hide_index=True,
+        _simple_df, use_container_width=True, hide_index=True,
         column_config={
-            "Aperçu":     st.column_config.ImageColumn("Aperçu", width="small"),
-            "Photo":      st.column_config.LinkColumn("Photo", display_text="🖼️ Voir"),
-            "Annonce":    st.column_config.LinkColumn("Annonce", display_text="🔗 Ouvrir"),
-            "Latitude":   st.column_config.NumberColumn(format="%.5f"),
-            "Longitude":  st.column_config.NumberColumn(format="%.5f"),
-            "Surface (m²)":          st.column_config.NumberColumn(format="%d m²"),
-            "Loyer facial €/m²/an":  st.column_config.NumberColumn(format="%.0f €"),
-            "Charges €/m²/an":       st.column_config.NumberColumn(format="%.0f €"),
-            "Loyer HT-HC €/m²/an":   st.column_config.NumberColumn(format="%.0f €"),
-            "Prix vente €/m²":       st.column_config.NumberColumn(format="%.0f €"),
-            "Parkings":              st.column_config.NumberColumn(format="%d"),
+            "Latitude":  st.column_config.NumberColumn(format="%.5f"),
+            "Longitude": st.column_config.NumberColumn(format="%.5f"),
+            "Surface (m²)": st.column_config.NumberColumn(format="%d m²"),
+            "Prix (€/m²)":  st.column_config.NumberColumn(format="%.0f €"),
         },
     )
-    st.caption("Vue générale complète — la ventilation Neuf/Restructuré vs Seconde main "
-                "et le rendu Savills exportable sont plus bas dans l'onglet Analyse.")
+    st.caption("💡 Vue simplifiée. Le détail complet (état, prestations, photos, "
+                "commentaires…) est disponible dans les tableaux Neuf/Seconde main "
+                "ci-dessous et dans l'export.")
+
 
 # ---------------------------------------------------------------- filtrage + score
 def _is_unknown(v):
@@ -2162,12 +2134,8 @@ def make_map(target_lat: float, target_lon: float, target_label: str,
     """Carte Folium centrée sur l'actif cible avec tous les comparables."""
 
     # centrage : on ne garde que les coordonnées finies pour éviter les NaN Folium
-    # (garde defensive : df vide peut ne pas avoir les colonnes _lat/_lon)
-    if "_lat" in res_df.columns and "_lon" in res_df.columns:
-        valid_lats = [float(v) for v in res_df["_lat"] if _valid_coord(v)]
-        valid_lons = [float(v) for v in res_df["_lon"] if _valid_coord(v)]
-    else:
-        valid_lats, valid_lons = [], []
+    valid_lats = [float(v) for v in res_df["_lat"] if _valid_coord(v)]
+    valid_lons = [float(v) for v in res_df["_lon"] if _valid_coord(v)]
     all_lats = [target_lat] + valid_lats
     all_lons = [target_lon] + valid_lons
     center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
@@ -2249,8 +2217,8 @@ def make_map(target_lat: float, target_lon: float, target_label: str,
         "Seconde main": "orange", "Non disponible": "gray",
     }
 
-    # valeur min/max pour dégradé (garde : field peut manquer sur df vide)
-    vals = res_df[field].apply(to_num).dropna() if field in res_df.columns else pd.Series(dtype=float)
+    # valeur min/max pour dégradé
+    vals = res_df[field].apply(to_num).dropna()
     v_min, v_max = (vals.min(), vals.max()) if len(vals) >= 2 else (0, 1)
 
     for _, row in res_df.iterrows():
