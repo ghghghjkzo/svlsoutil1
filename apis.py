@@ -373,25 +373,29 @@ DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
 _DVF_CACHE: dict[str, pd.DataFrame] = {}
 
 
-def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
-    if code_insee in _DVF_CACHE:
-        return _DVF_CACHE[code_insee]
-    dept = code_insee[:2]
-    url  = f"{DVF_BASE_URL}/{dept}/communes/{code_insee}.csv"
-    # Certains CDN data.gouv rejettent les User-Agent « bot ». On tente d'abord
-    # l'en-tête projet, puis un repli navigateur si la 1re requête est refusée.
-    for _hdr in (_H, {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}):
-        try:
-            r = requests.get(url, timeout=30, headers=_hdr)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text), sep=",", dtype=str, low_memory=False)
-            _DVF_CACHE[code_insee] = df           # on ne cache que le succès
-            return df
-        except Exception as e:
-            print(f"[DVF] {url[:60]} ({_hdr.get('User-Agent','')[:15]}…) — {e}")
-            continue
-    return None
+DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
+DVF_YEARS = ("2025", "2024", "2023", "2022", "2021")  # profondeur d'historique — ajuster si besoin
 
+
+@lru_cache(maxsize=32)
+def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
+    # Structure data.gouv actuelle : {base}/{année}/communes/{dept}/{code_insee}.csv
+    dept = code_insee[:2]
+    frames = []
+    for year in DVF_YEARS:
+        url = f"{DVF_BASE_URL}/{year}/communes/{dept}/{code_insee}.csv"
+        try:
+            r = requests.get(url, timeout=30, headers=_H)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            frames.append(pd.read_csv(io.StringIO(r.text), sep=",", dtype=str, low_memory=False))
+        except Exception as e:
+            print(f"[DVF] {year} {code_insee} — {e}")
+            continue
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 def _to_float(v) -> float | None:
     try:
