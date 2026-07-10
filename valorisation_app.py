@@ -1094,18 +1094,30 @@ def build_export_table(res_df: pd.DataFrame, operation: str = "Location") -> pd.
 
 
 def _download_photo(url: str, timeout: int = 6) -> bytes | None:
-    """Télécharge une photo pour l'intégrer dans l'Excel. Retourne None en cas d'échec."""
+    """Télécharge une photo pour l'intégrer dans l'Excel. Retourne None en cas d'échec.
+    Envoie des headers navigateur + un Referer dérivé du domaine de l'image : cela
+    débloque les CDN qui vérifient l'origine (Geolocaux, etc.). Certains CDN restent
+    verrouillés par signature d'URL (BureauxLocaux) — on renvoie None proprement et
+    l'export continue sans cette photo."""
     if not url or not url.startswith("http"):
         return None
     try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        referer = f"{parsed.scheme}://{parsed.netloc}/"
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+            "Referer": referer,
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
+        r = requests.get(url, timeout=timeout, headers=headers)
         if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
             return r.content
     except Exception:
         pass
     return None
-
-
 def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comparables",
                           operation: str = "Location") -> bytes:
     """Export Excel professionnel charte Savills avec sections visuelles."""
