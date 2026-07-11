@@ -1557,7 +1557,9 @@ with st.sidebar:
             "Ne garder que les annonces complètes (adresse précise + prix exploitable)",
             value=True,
         )
-        run_live = st.button("Lancer la recherche en direct", disabled=not target)
+        if st.button("Lancer la recherche en direct", disabled=not target):
+            st.session_state.live_go = True
+        run_live = st.session_state.get("live_go", False)
 
     # ── Section APIs ──────────────────────────────────────────────────
     st.header("4 — APIs externes")
@@ -1586,8 +1588,10 @@ with st.sidebar:
             options=[5, 10, 15, 20, 30],
             default=[5, 10, 15],
         )
-        run_targomo = st.button("Calculer les isochrones",
-                                 disabled=not (target and targomo_key))
+        if st.button("Calculer les isochrones",
+                     disabled=not (target and targomo_key)):
+            st.session_state.targomo_go = True
+        run_targomo = st.session_state.get("targomo_go", False)
 
     with st.expander("🏛️ DVF (transactions notariales)", expanded=False):
         dvf_source = st.radio(
@@ -1609,25 +1613,36 @@ with st.sidebar:
                     help="Astuce : ajoute SOGEFI_API_KEY dans les variables "
                          "d'environnement Render pour ne plus la saisir.",
                 )
-        dvf_radius_km = st.slider("Rayon DVF (km)", 0.5, 5.0, 2.0, 0.5)
+        # SOGEFI plante (500) au-delà de ~1.3 km de rayon (zone trop large pour
+        # leur serveur). On plafonne le curseur en conséquence ; le DVF gratuit
+        # n'a pas cette limite (fichiers communaux téléchargés en entier).
+        if dvf_source.startswith("SOGEFI"):
+            dvf_radius_km = st.slider("Rayon DVF (km)", 0.3, 1.3, 1.0, 0.1,
+                                      help="SOGEFI limite la zone : max 1,3 km.")
+        else:
+            dvf_radius_km = st.slider("Rayon DVF (km)", 0.5, 5.0, 2.0, 0.5)
         dvf_years = st.slider("Années à inclure", 1, 10, 5)
         dvf_types = st.multiselect(
             "Types de locaux",
             options=list(apis.LOCAL_TERTIAIRE),
             default=list(apis.LOCAL_TERTIAIRE),
         )
-        run_dvf = st.button(
+        if st.button(
             "Charger les transactions DVF",
             disabled=not target or (dvf_source.startswith("SOGEFI") and not sogefi_key),
-        )
+        ):
+            st.session_state.dvf_go = True
+        run_dvf = st.session_state.get("dvf_go", False)
         run_dvf_commune = False
         if not dvf_source.startswith("SOGEFI"):
-            run_dvf_commune = st.button(
+            if st.button(
                 "🗺️ Cartographier toute la commune",
                 disabled=not target,
                 help="Affiche TOUTES les transactions de la commune (pas seulement "
                      "celles dans le rayon) — gratuit, aucun coût de quota.",
-            )
+            ):
+                st.session_state.dvf_commune_go = True
+            run_dvf_commune = st.session_state.get("dvf_commune_go", False)
 
 if mode == "Charger un fichier Excel":
     if not file:
@@ -1654,6 +1669,7 @@ else:
     search_commune = target.get("city") or manual_commune.strip() or "Nantes"
     search_cp = target.get("postcode") or manual_cp.strip() or "44000"
     if run_live:
+        st.session_state.live_go = False  # consomme le flag : une recherche par clic
         ops_to_search = ["Location", "Vente"] if op.startswith("Tous") else [op]
         types_to_search = ["Bureaux", "Activités", "Commerce"] if asset_type == "Tous" else [asset_type]
         n_sources = len(selected_sources) if selected_sources else len(live_search.ALL_SOURCES)
@@ -1874,6 +1890,18 @@ def passes(row_):
 
 res = df[df.apply(passes, axis=1)].copy()
 
+# ── Descriptif auto : génère la colonne Commentaire pour l'affichage à l'écran
+# (tableaux Neuf/Seconde main). Sans ça, la colonne n'existe que dans l'export
+# et disparaît des tableaux. On respecte un commentaire déjà saisi (non écrasé).
+if not res.empty:
+    if "Commentaire" not in res.columns:
+        res["Commentaire"] = ""
+    _mask_vide = res["Commentaire"].fillna("").astype(str).str.strip() == ""
+    if _mask_vide.any():
+        res.loc[_mask_vide, "Commentaire"] = res[_mask_vide].apply(
+            lambda r: auto_comment(r.to_dict()), axis=1
+        )
+
 # ── Diagnostic non-bloquant (sans st.stop) ───────────────────────────────
 if res.empty:
     n_total = len(df)
@@ -1977,7 +2005,9 @@ COLS_KEEP = {
 }
 COL_CONFIG = {
     "Lien":                   st.column_config.LinkColumn("Lien", display_text="🔗 Annonce"),
-    "Photo":                  st.column_config.LinkColumn("Photo", display_text="🖼️ Voir"),
+    "Photo":                  st.column_config.ImageColumn(
+        "Photo", help="Aperçu de l'annonce (clic pour agrandir)"
+    ),
     "Surface (m²)":           st.column_config.NumberColumn(format="%d m²"),
     "Loyer facial €/m²/an":  st.column_config.NumberColumn(format="%.0f €"),
     "Charges €/m²/an":       st.column_config.NumberColumn(format="%.0f €"),
@@ -2697,6 +2727,7 @@ with tab_dvf:
             st.session_state.dvf_commune_results = pd.DataFrame()
 
         if run_dvf:
+            st.session_state.dvf_go = False  # consomme le flag : une requête par clic
             if dvf_source.startswith("SOGEFI"):
                 with st.spinner("Interrogation SOGEFI DVF+…"):
                     result = apis.fetch_sogefi_mutations(
@@ -2740,10 +2771,20 @@ with tab_dvf:
                             )
                         else:
                             st.success(f"✅ {len(dvf_df)} transaction(s) trouvée(s).")
+                            _failed = getattr(apis, "DVF_LAST_FAILED_YEARS", [])
+                            if _failed:
+                                st.warning(
+                                    f"⚠️ data.gouv n'a pas répondu pour {len(_failed)} année(s) "
+                                    f"({', '.join(_failed)}) — résultats **partiels**. "
+                                    f"C'est une indisponibilité temporaire de data.gouv, pas un "
+                                    f"bug : relance la recherche dans quelques minutes pour "
+                                    f"récupérer l'historique complet."
+                                )
                     except Exception as e:
                         st.error(f"Erreur DVF : {e}")
 
         if run_dvf_commune:
+            st.session_state.dvf_commune_go = False  # consomme le flag
             with st.spinner(f"Téléchargement de toutes les transactions de {search_commune_dvf}…"):
                 try:
                     commune_df = apis.get_dvf_commune_complete(
@@ -2873,19 +2914,22 @@ with tab_dvf:
                 if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
                     continue
                 px = row.get("Prix/m²")
+                # NaN est truthy → tester pd.notna avant round(px), sinon
+                # "cannot convert float NaN to integer" (bug carte transactions)
+                _px_txt = f"{round(px)} €/m²" if pd.notna(px) else None
                 popup_html = (
                     f"<b>{row.get('Adresse','—')}, {row.get('Commune','')}</b><br>"
                     f"Date : {row.get('Date','—')}<br>"
                     f"Type : {row.get('Type','—')}<br>"
                     f"Surface : {row.get('Surface (m²)','—')} m²<br>"
-                    f"<b>Prix : {str(round(px)) + ' €/m²' if px else '—'}</b>"
+                    f"<b>Prix : {_px_txt or '—'}</b>"
                 )
                 folium.CircleMarker(
                     location=[float(row["_lat"]), float(row["_lon"])],
                     radius=9, color="white", weight=1.5,
                     fill=True, fill_color="#008493", fill_opacity=0.85,
                     popup=folium.Popup(popup_html, max_width=240),
-                    tooltip=f"DVF — {str(round(px)) + ' €/m²' if px else 'prix inconnu'}",
+                    tooltip=f"DVF — {_px_txt or 'prix inconnu'}",
                 ).add_to(dvf_map)
 
             components.html(dvf_map._repr_html_(), height=480, scrolling=False)
@@ -3014,6 +3058,7 @@ with tab_targomo:
             st.session_state.targomo_results = {}
 
         if run_targomo:
+            st.session_state.targomo_go = False  # consomme le flag : une requête par clic
             for mode in (targomo_modes or ["walk"]):
                 with st.spinner(f"Calcul isochrones — {apis.TRAVEL_MODES.get(mode, mode)}…"):
                     result = apis.fetch_isochrones(

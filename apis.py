@@ -370,23 +370,36 @@ DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
 DVF_YEARS = ("2025", "2024", "2023", "2022", "2021")  # profondeur d'historique — ajuster si besoin
 
 
+# Années DVF qui ont échoué au dernier appel (503, timeout… = data.gouv en rade).
+# Les 404 (année sans données pour la commune) n'y figurent PAS : c'est normal.
+# L'app peut lire cette liste après un appel pour avertir d'un résultat partiel.
+DVF_LAST_FAILED_YEARS: list[str] = []
+
+
 @lru_cache(maxsize=32)
 def download_dvf_commune(code_insee: str) -> pd.DataFrame | None:
     # Structure data.gouv actuelle : {base}/{année}/communes/{dept}/{code_insee}.csv
     # On fusionne plusieurs millésimes pour la profondeur d'historique.
     dept = code_insee[:2]
     frames = []
+    failed = []
     for year in DVF_YEARS:
         url = f"{DVF_BASE_URL}/{year}/communes/{dept}/{code_insee}.csv"
         try:
             r = requests.get(url, timeout=30, headers=_H)
             if r.status_code == 404:
-                continue  # pas de mutations cette année pour cette commune
+                continue  # pas de mutations cette année pour cette commune (normal)
             r.raise_for_status()
             frames.append(pd.read_csv(io.StringIO(r.text), sep=",", dtype=str, low_memory=False))
         except Exception as e:
             print(f"[DVF] {year} {code_insee} — {e}")
+            failed.append(year)  # vrai échec réseau/serveur (503, timeout…)
             continue
+    # On expose la liste des années réellement en échec (hors cache : recalculée
+    # à chaque exécution réelle du corps ; en cas de hit cache, elle reflète le
+    # dernier appel non-caché — acceptable pour un simple avertissement).
+    DVF_LAST_FAILED_YEARS.clear()
+    DVF_LAST_FAILED_YEARS.extend(failed)
     if not frames:
         return None
     return pd.concat(frames, ignore_index=True)
@@ -642,6 +655,11 @@ def fetch_sogefi_mutations(
     if not api_key:
         return {"ok": False, "error": "Clé API SOGEFI manquante."}
 
+    # Garde-fou : au-delà de ~1300 m, l'API SOGEFI renvoie une erreur 500
+    # (zone trop large). On cape pour éviter l'échec, en complément du
+    # plafonnement du curseur côté interface.
+    radius_m = min(radius_m, 1300)
+
     url = f"{SOGEFI_BASE}/{api_key}/dvfplus/v1.0/sogefi/mutation/search"
 
     filter_obj = {}
@@ -666,13 +684,18 @@ def fetch_sogefi_mutations(
         if r.status_code == 400:
             return {"ok": False, "error": f"Requête invalide (400) — polygone probablement "
                                           f"trop grand : {r.text[:200]}"}
+        if r.status_code >= 500:
+            return {"ok": False, "error": f"Serveur SOGEFI indisponible (erreur {r.status_code}). "
+                                          f"Réessaie plus tard, ou réduis le rayon."}
         r.raise_for_status()
         data = r.json()
         return {"ok": True, "features": data.get("features", [])}
     except requests.exceptions.Timeout:
         return {"ok": False, "error": "Timeout — l'API SOGEFI n'a pas répondu à temps."}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # On n'inclut PAS str(e) : sur une HTTPError, le message contient l'URL
+        # complète — donc la clé API. On expose seulement le type d'erreur.
+        return {"ok": False, "error": f"Échec de la requête SOGEFI ({type(e).__name__})."}
 
 
 def sogefi_features_to_df(features: list[dict], center_lat: float, center_lon: float) -> pd.DataFrame:
