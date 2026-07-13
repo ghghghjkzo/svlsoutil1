@@ -1813,33 +1813,48 @@ t_lat, t_lon, t_label = target["lat"], target["lon"], target["label"]
 radius_m = radius_km * 1000
 
 # ---------------------------------------------------------------- géocodage des comps
-progress = st.progress(0.0, text="Géocodage des comparables…")
-lats, lons, dists = [], [], []
-for i, row_ in df.iterrows():
-    lat = to_num(row_.get("Latitude"))
-    lon = to_num(row_.get("Longitude"))
-    if lat is None or lon is None:
-        addr_val = str(row_.get("Adresse", "") or "")
-        # n'inclure l'adresse que si elle contient vraiment une info de rue
-        addr_clean = "" if any(x in addr_val.lower() for x in
-                               ("non disponible", "non extraite", "adresse précise")) \
-                     else addr_val.strip()
-        commune = str(row_.get("Commune", "") or "").strip()
-        cp      = str(row_.get("Code_postal", "") or "").strip()
-        # construire la query en garantissant qu'on a au moins la commune
-        parts = [p for p in [addr_clean, cp, commune] if p and p != "Non disponible"]
-        q = " ".join(parts)
-        g = geocode(q) if q else None
-        if g:
-            lat, lon = g["lat"], g["lon"]
-        time.sleep(0.05)
-    # stocker None explicitement (pas NaN) pour les coords manquantes
-    lats.append(float(lat) if lat is not None else None)
-    lons.append(float(lon) if lon is not None else None)
-    dists.append(haversine_m(t_lat, t_lon, lat, lon)
-                 if (lat is not None and lon is not None) else None)
-    progress.progress((i + 1) / max(len(df), 1), text=f"Géocodage… {i+1}/{len(df)}")
-progress.empty()
+# Le géocodage est mis en cache par session : sans ça, la boucle (avec ses
+# pauses réseau) se ré-exécutait à CHAQUE rerun Streamlit (interaction avec un
+# tableau éditable, rechargement de carte…), gardant l'app bloquée en état
+# « RUNNING » — d'où l'overlay gris permanent. On ne recalcule que si le jeu
+# de comparables ou la cible a changé.
+_geo_signature = (
+    t_lat, t_lon, len(df),
+    hash(tuple(df.get("Adresse", pd.Series(dtype=str)).fillna("").astype(str)))
+    if not df.empty else 0,
+)
+if st.session_state.get("_geo_sig") == _geo_signature and "_geo_cache" in st.session_state:
+    # Réutilise le géocodage déjà calculé (pas de re-boucle, pas de sleep)
+    lats, lons, dists = st.session_state["_geo_cache"]
+else:
+    progress = st.progress(0.0, text="Géocodage des comparables…")
+    lats, lons, dists = [], [], []
+    for i, row_ in df.iterrows():
+        lat = to_num(row_.get("Latitude"))
+        lon = to_num(row_.get("Longitude"))
+        if lat is None or lon is None:
+            addr_val = str(row_.get("Adresse", "") or "")
+            # n'inclure l'adresse que si elle contient vraiment une info de rue
+            addr_clean = "" if any(x in addr_val.lower() for x in
+                                   ("non disponible", "non extraite", "adresse précise")) \
+                         else addr_val.strip()
+            commune = str(row_.get("Commune", "") or "").strip()
+            cp      = str(row_.get("Code_postal", "") or "").strip()
+            # construire la query en garantissant qu'on a au moins la commune
+            parts = [p for p in [addr_clean, cp, commune] if p and p != "Non disponible"]
+            q = " ".join(parts)
+            g = geocode(q) if q else None
+            if g:
+                lat, lon = g["lat"], g["lon"]
+        # stocker None explicitement (pas NaN) pour les coords manquantes
+        lats.append(float(lat) if lat is not None else None)
+        lons.append(float(lon) if lon is not None else None)
+        dists.append(haversine_m(t_lat, t_lon, lat, lon)
+                     if (lat is not None and lon is not None) else None)
+        progress.progress((i + 1) / max(len(df), 1), text=f"Géocodage… {i+1}/{len(df)}")
+    progress.empty()
+    st.session_state["_geo_cache"] = (lats, lons, dists)
+    st.session_state["_geo_sig"] = _geo_signature
 
 df["_lat"], df["_lon"], df["_dist"] = lats, lons, dists
 
@@ -2910,6 +2925,13 @@ with tab_dvf:
             folium.Marker([t_lat, t_lon], tooltip="🏢 Actif",
                           icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(dvf_map)
 
+            # Clustering : sans ça, 5000+ CircleMarkers rendent la carte
+            # extrêmement lente à générer (l'app reste bloquée en « RUNNING »,
+            # overlay gris permanent). Le cluster regroupe les points et rend
+            # l'affichage instantané, sans perdre aucune transaction.
+            from folium.plugins import MarkerCluster
+            _dvf_cluster = MarkerCluster(name="Transactions").add_to(dvf_map)
+
             for _, row in dvf_df.iterrows():
                 if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
                     continue
@@ -2930,7 +2952,7 @@ with tab_dvf:
                     fill=True, fill_color="#008493", fill_opacity=0.85,
                     popup=folium.Popup(popup_html, max_width=240),
                     tooltip=f"DVF — {_px_txt or 'prix inconnu'}",
-                ).add_to(dvf_map)
+                ).add_to(_dvf_cluster)
 
             components.html(dvf_map._repr_html_(), height=480, scrolling=False)
 
