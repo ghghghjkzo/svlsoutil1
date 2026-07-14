@@ -2494,7 +2494,8 @@ with tab_env:
     OVERPASS_MIRRORS = [
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.ru/api/interpreter",
+        "https://overpass.openstreetmap.fr/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     ]
 
     if "overpass_errors" not in st.session_state:
@@ -2542,32 +2543,77 @@ out center;"""
     st.caption("Données OpenStreetMap via Overpass API · Mise en cache 1h · Aucune clé API")
 
     st.session_state.overpass_errors = []  # reset avant chaque analyse
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def overpass_fetch_all(lat: float, lon: float, radius: int = 3000) -> list:
+        """UNE seule requête Overpass récupère tous les POI utiles dans le rayon
+        max, au lieu de 13 requêtes séparées. On filtre ensuite par tag/rayon en
+        Python. Bien plus fiable : 1 appel = 13× moins de risque de timeout."""
+        query = f"""[out:json][timeout:60];
+(
+  node["railway"="tram_stop"](around:{radius},{lat},{lon});
+  node["highway"="bus_stop"](around:{radius},{lat},{lon});
+  node["railway"="station"](around:{radius},{lat},{lon});
+  node["amenity"="bicycle_rental"](around:{radius},{lat},{lon});
+  node["amenity"~"restaurant|cafe|fast_food"](around:{radius},{lat},{lon});
+  node["tourism"="hotel"](around:{radius},{lat},{lon});
+  node["amenity"~"bank|atm"](around:{radius},{lat},{lon});
+  node["leisure"~"fitness_centre|sports_centre"](around:{radius},{lat},{lon});
+  way["leisure"~"fitness_centre|sports_centre"](around:{radius},{lat},{lon});
+  node["amenity"~"childcare|kindergarten"](around:{radius},{lat},{lon});
+  node["shop"~"supermarket|convenience"](around:{radius},{lat},{lon});
+  node["amenity"="pharmacy"](around:{radius},{lat},{lon});
+  node["office"](around:{radius},{lat},{lon});
+  way["office"](around:{radius},{lat},{lon});
+);
+out center;"""
+        last_error = None
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                r = requests.post(mirror, data={"data": query}, timeout=60,
+                                  headers={"User-Agent": "ValoApp/1.0 (real-estate valuation)"})
+                r.raise_for_status()
+                return r.json().get("elements", [])
+            except requests.exceptions.HTTPError:
+                last_error = f"{mirror.split('/')[2]} — HTTP {r.status_code}"
+                if r.status_code == 429:
+                    time.sleep(1.5)
+            except Exception as e:
+                last_error = f"{mirror.split('/')[2]} — {type(e).__name__}"
+        if last_error:
+            st.session_state.overpass_errors.append(last_error)
+        return []
+
+    def _tag(e, k):
+        return (e.get("tags") or {}).get(k, "")
+
+    def _in_radius(e, lat, lon, r):
+        elat = e.get("lat") or (e.get("center") or {}).get("lat")
+        elon = e.get("lon") or (e.get("center") or {}).get("lon")
+        if not elat or not elon:
+            return False
+        return haversine_m(lat, lon, elat, elon) <= r
+
     with st.spinner("Analyse de l'environnement en cours…"):
-        tram_els    = overpass_fetch(t_lat, t_lon, 1000, '["railway"="tram_stop"]')
-        time.sleep(0.3)
-        bus_els     = overpass_fetch(t_lat, t_lon,  800, '["highway"="bus_stop"]')
-        time.sleep(0.3)
-        train_els   = overpass_fetch(t_lat, t_lon, 3000, '["railway"="station"]')
-        time.sleep(0.3)
-        bike_els    = overpass_fetch(t_lat, t_lon,  500, '["amenity"="bicycle_rental"]')
-        time.sleep(0.3)
-        resto_300   = overpass_fetch(t_lat, t_lon,  300, '["amenity"~"restaurant|cafe|fast_food"]')
-        time.sleep(0.3)
-        resto_500   = overpass_fetch(t_lat, t_lon,  500, '["amenity"~"restaurant|cafe|fast_food"]')
-        time.sleep(0.3)
-        hotel_500   = overpass_fetch(t_lat, t_lon,  500, '["tourism"="hotel"]')
-        time.sleep(0.3)
-        bank_300    = overpass_fetch(t_lat, t_lon,  300, '["amenity"~"bank|atm"]')
-        time.sleep(0.3)
-        sport_1k    = overpass_fetch(t_lat, t_lon, 1000, '["leisure"~"fitness_centre|sports_centre"]')
-        time.sleep(0.3)
-        creche_1k   = overpass_fetch(t_lat, t_lon, 1000, '["amenity"~"childcare|kindergarten"]')
-        time.sleep(0.3)
-        supermarche = overpass_fetch(t_lat, t_lon,  500, '["shop"~"supermarket|convenience"]')
-        time.sleep(0.3)
-        pharmacy    = overpass_fetch(t_lat, t_lon,  500, '["amenity"="pharmacy"]')
-        time.sleep(0.3)
-        offices_500 = overpass_fetch(t_lat, t_lon,  500, '["office"]')
+        _all = overpass_fetch_all(t_lat, t_lon, 3000)
+
+    # Filtrage local par catégorie (tag + rayon) — aucune requête réseau ici
+    def _f(pred, r):
+        return [e for e in _all if pred(e) and _in_radius(e, t_lat, t_lon, r)]
+
+    tram_els    = _f(lambda e: _tag(e,"railway")=="tram_stop", 1000)
+    bus_els     = _f(lambda e: _tag(e,"highway")=="bus_stop", 800)
+    train_els   = _f(lambda e: _tag(e,"railway")=="station", 3000)
+    bike_els    = _f(lambda e: _tag(e,"amenity")=="bicycle_rental", 500)
+    resto_300   = _f(lambda e: _tag(e,"amenity") in ("restaurant","cafe","fast_food"), 300)
+    resto_500   = _f(lambda e: _tag(e,"amenity") in ("restaurant","cafe","fast_food"), 500)
+    hotel_500   = _f(lambda e: _tag(e,"tourism")=="hotel", 500)
+    bank_300    = _f(lambda e: _tag(e,"amenity") in ("bank","atm"), 300)
+    sport_1k    = _f(lambda e: _tag(e,"leisure") in ("fitness_centre","sports_centre"), 1000)
+    creche_1k   = _f(lambda e: _tag(e,"amenity") in ("childcare","kindergarten"), 1000)
+    supermarche = _f(lambda e: _tag(e,"shop") in ("supermarket","convenience"), 500)
+    pharmacy    = _f(lambda e: _tag(e,"amenity")=="pharmacy", 500)
+    offices_500 = _f(lambda e: bool(_tag(e,"office")), 500)
 
     # Diagnostic réel : si tout est vide, dire pourquoi plutôt que d'afficher "0" partout
     all_empty = not any([tram_els, bus_els, train_els, bike_els, resto_300, resto_500,
