@@ -182,6 +182,53 @@ def slugify(s: str) -> str:
     return s
 
 
+# Correspondance code département → (slug département, slug région) pour construire
+# les URLs d'ArthurLoyd / TournyMeyer / CBRE, qui incluent dept + région dans le
+# chemin. Sans ça, ces 3 sources étaient figées sur la Loire-Atlantique / Pays de
+# la Loire et renvoyaient un 404 pour toute autre ville (ex. Paris).
+_DEPT_REGION = {
+    "75": ("paris", "ile-de-france"),
+    "77": ("seine-et-marne", "ile-de-france"),
+    "78": ("yvelines", "ile-de-france"),
+    "91": ("essonne", "ile-de-france"),
+    "92": ("hauts-de-seine", "ile-de-france"),
+    "93": ("seine-saint-denis", "ile-de-france"),
+    "94": ("val-de-marne", "ile-de-france"),
+    "95": ("val-d-oise", "ile-de-france"),
+    "44": ("loire-atlantique", "pays-de-la-loire"),
+    "49": ("maine-et-loire", "pays-de-la-loire"),
+    "53": ("mayenne", "pays-de-la-loire"),
+    "72": ("sarthe", "pays-de-la-loire"),
+    "85": ("vendee", "pays-de-la-loire"),
+    "35": ("ille-et-vilaine", "bretagne"),
+    "29": ("finistere", "bretagne"),
+    "22": ("cotes-d-armor", "bretagne"),
+    "56": ("morbihan", "bretagne"),
+    "33": ("gironde", "nouvelle-aquitaine"),
+    "31": ("haute-garonne", "occitanie"),
+    "34": ("herault", "occitanie"),
+    "69": ("rhone", "auvergne-rhone-alpes"),
+    "38": ("isere", "auvergne-rhone-alpes"),
+    "13": ("bouches-du-rhone", "provence-alpes-cote-d-azur"),
+    "06": ("alpes-maritimes", "provence-alpes-cote-d-azur"),
+    "59": ("nord", "hauts-de-france"),
+    "67": ("bas-rhin", "grand-est"),
+    "21": ("cote-d-or", "bourgogne-franche-comte"),
+    "51": ("marne", "grand-est"),
+    "76": ("seine-maritime", "normandie"),
+    "37": ("indre-et-loire", "centre-val-de-loire"),
+    "45": ("loiret", "centre-val-de-loire"),
+}
+
+
+def _dept_region_from_cp(code_postal: str, default=("loire-atlantique", "pays-de-la-loire")):
+    """Retourne (dept_slug, region_slug) à partir des 2 premiers chiffres du CP.
+    Défaut = Loire-Atlantique (comportement historique) si CP inconnu/absent."""
+    cp = str(code_postal or "").strip()
+    key = cp[:2] if len(cp) >= 2 else ""
+    return _DEPT_REGION.get(key, default)
+
+
 def fetch(url: str, timeout: int = 12, max_bytes: int = 5_000_000) -> str | None:
     """Récupère une page HTML. Plafonne la taille à max_bytes pour éviter qu'une
     page anormalement lourde sature la RAM. requests gère seul la décompression
@@ -886,7 +933,7 @@ def search_geolocaux(commune: str, code_postal: str, operation: str = "location"
 
 
 def search_arthurloyd(commune: str, code_postal: str, operation: str = "location",
-                       type_bien: str = "bureaux", region: str = "pays-de-la-loire",
+                       type_bien: str = "bureaux", region: str | None = None,
                        max_pages: int = 1) -> list[dict]:
     op = "location" if operation.lower().startswith("loc") else "vente"
     type_map = {
@@ -897,32 +944,40 @@ def search_arthurloyd(commune: str, code_postal: str, operation: str = "location
     }
     tb = type_map.get(type_bien.lower(), f"bureau-{op}")
     slug = slugify(commune)
+    if region is None:
+        region = _dept_region_from_cp(code_postal)[1]  # slug région depuis le CP
     url = f"https://www.arthur-loyd.com/{tb}/{region}/{slug}"
     return _run_search(url, "ArthurLoyd.com", commune, code_postal, type_bien,
                        max_pages=max_pages)
 
 
 def search_tournymeyer(commune: str, code_postal: str, operation: str = "location",
-                        type_bien: str = "bureaux", departement: str = "loire-atlantique",
+                        type_bien: str = "bureaux", departement: str | None = None,
                         max_pages: int = 1) -> list[dict]:
     op = "location" if operation.lower().startswith("loc") else "ventes"
     type_map = {"bureaux": "bureaux", "activités": "entrepots", "activites": "entrepots",
                 "commerce": "commerces"}
     tb = type_map.get(type_bien.lower(), "bureaux")
     slug = slugify(commune)
+    if departement is None:
+        departement = _dept_region_from_cp(code_postal)[0]  # slug dept depuis le CP
     url = f"https://www.tournymeyer.fr/offres/{op}/{tb}/{departement}/{slug}/"
     return _run_search(url, "TournyMeyer.fr (JLL)", commune, code_postal, type_bien,
                        max_pages=max_pages)
 
 
 def search_cbre(commune: str, code_postal: str, operation: str = "location",
-                 type_bien: str = "bureaux", region: str = "pays-de-la-loire",
-                 departement: str = "loire-atlantique", max_pages: int = 1) -> list[dict]:
+                 type_bien: str = "bureaux", region: str | None = None,
+                 departement: str | None = None, max_pages: int = 1) -> list[dict]:
     op = "location" if operation.lower().startswith("loc") else "vente"
     type_map = {"bureaux": "bureaux", "activités": "entrepots", "activites": "entrepots",
                 "commerce": "commerces"}
     tb = type_map.get(type_bien.lower(), "bureaux")
     slug = slugify(commune)
+    if region is None or departement is None:
+        _dept, _reg = _dept_region_from_cp(code_postal)
+        departement = departement or _dept
+        region = region or _reg
     url = f"https://immobilier.cbre.fr/{op}-{tb}/{region}/{departement}/{slug}.aspx"
     return _run_search(url, "CBRE.fr (non vérifié)", commune, code_postal, type_bien,
                        max_pages=max_pages)

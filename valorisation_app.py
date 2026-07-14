@@ -1218,8 +1218,19 @@ def export_to_excel_bytes(export_df: pd.DataFrame, title: str = "Extraction comp
             img_bytes = _download_photo(photo_url)
             if img_bytes:
                 try:
+                    # Convertir en JPEG quel que soit le format source (WebP, AVIF,
+                    # PNG…). Sans ça, une image WebP nommée .jpg fait planter
+                    # openpyxl avec l'erreur "'.webp'". Pillow normalise tout.
+                    from PIL import Image as PILImage
+                    import io as _io
+                    _im = PILImage.open(_io.BytesIO(img_bytes))
+                    if _im.mode not in ("RGB", "L"):
+                        _im = _im.convert("RGB")
+                    _buf = _io.BytesIO()
+                    _im.save(_buf, format="JPEG", quality=85)
+                    _jpeg_bytes = _buf.getvalue()
                     with tempfile.NamedTemporaryFile(suffix=".jpg",delete=False) as tmp:
-                        tmp.write(img_bytes); tp = tmp.name
+                        tmp.write(_jpeg_bytes); tp = tmp.name
                     xi = XLImage(tp); xi.width,xi.height = 110,70
                     ws.add_image(xi,f"{gcl(photo_j)}{r}"); tmp_files.append(tp)
                 except Exception:
@@ -2225,11 +2236,26 @@ def make_map(target_lat: float, target_lon: float, target_label: str,
     vals = res_df[field].apply(to_num).dropna()
     v_min, v_max = (vals.min(), vals.max()) if len(vals) >= 2 else (0, 1)
 
-    for _, row in res_df.iterrows():
+    for _idx, (_, row) in enumerate(res_df.iterrows()):
         lat, lon = row.get("_lat"), row.get("_lon")
         if not _valid_coord(lat) or not _valid_coord(lon):
             continue
         lat, lon = float(lat), float(lon)
+
+        # Jitter : quand l'annonce n'a pas d'adresse de rue précise, elle est
+        # géocodée au centroïde de la commune/arrondissement — tous ces points
+        # se superposent exactement. On applique un léger décalage déterministe
+        # (~0-40 m, basé sur l'index) pour les rendre distinguables sur la carte
+        # sans prétendre à une localisation exacte.
+        _addr_raw = str(row.get("Adresse") or "").lower()
+        _addr_imprecise = (not _addr_raw) or any(
+            x in _addr_raw for x in ("non disponible", "non extraite", "adresse précise"))
+        if _addr_imprecise:
+            import math as _m
+            _ang = (_idx * 137.5) * _m.pi / 180.0   # angle d'or → répartition en spirale
+            _rad = 0.00012 * (1 + (_idx % 7))       # ~13 à 90 m
+            lat += _rad * _m.cos(_ang)
+            lon += _rad * _m.sin(_ang)
 
         val = to_num(row.get(field))
         etat = str(row.get("Etat") or "Non disponible").strip()
@@ -2283,7 +2309,8 @@ def make_map(target_lat: float, target_lon: float, target_label: str,
         """
         # tooltip : inclut la zone PLU si disponible
         plu_tooltip = f" · PLU {plu_zone}" if plu_zone else ""
-        tooltip_str = f"{val_str} · {adresse or commune}{plu_tooltip}"
+        _approx_tooltip = " · 📍approx." if _addr_imprecise else ""
+        tooltip_str = f"{val_str} · {adresse or commune}{plu_tooltip}{_approx_tooltip}"
         couleur = COULEUR_ETAT.get(etat, "gray")
 
         folium.CircleMarker(
@@ -2492,10 +2519,10 @@ with tab_carte:
 with tab_env:
 
     OVERPASS_MIRRORS = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
         "https://overpass.openstreetmap.fr/api/interpreter",
         "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
     ]
 
     if "overpass_errors" not in st.session_state:
@@ -2781,6 +2808,7 @@ with tab_dvf:
                             commune=search_commune_dvf,
                             types_locaux=set(dvf_types) if dvf_types else None,
                             annees=dvf_years,
+                            code_postal=target.get("postcode", ""),
                         )
                         st.session_state.dvf_results = dvf_df
                         if dvf_df.empty:
@@ -2812,6 +2840,7 @@ with tab_dvf:
                         types_locaux=set(dvf_types) if dvf_types else None,
                         annees=dvf_years,
                         ref_lat=t_lat, ref_lon=t_lon,
+                        code_postal=target.get("postcode", ""),
                     )
                     st.session_state.dvf_commune_results = commune_df
                     if commune_df.empty:
@@ -2937,12 +2966,17 @@ with tab_dvf:
             folium.Marker([t_lat, t_lon], tooltip="🏢 Actif",
                           icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(dvf_map)
 
-            # Clustering : sans ça, 5000+ CircleMarkers rendent la carte
-            # extrêmement lente à générer (l'app reste bloquée en « RUNNING »,
-            # overlay gris permanent). Le cluster regroupe les points et rend
-            # l'affichage instantané, sans perdre aucune transaction.
-            from folium.plugins import MarkerCluster
-            _dvf_cluster = MarkerCluster(name="Transactions").add_to(dvf_map)
+            # Cible d'ajout des marqueurs : au-delà de 200 points on passe par un
+            # MarkerCluster (sinon rendu très lent). En dessous, on ajoute
+            # directement à la carte — plus fiable, car le JS du cluster ne se
+            # rend pas toujours dans un components.html statique (points invisibles).
+            _n_valid = sum(1 for _, rw in dvf_df.iterrows()
+                           if _valid_coord(rw.get("_lat")) and _valid_coord(rw.get("_lon")))
+            if _n_valid > 200:
+                from folium.plugins import MarkerCluster
+                _marker_target = MarkerCluster(name="Transactions").add_to(dvf_map)
+            else:
+                _marker_target = dvf_map
 
             for _, row in dvf_df.iterrows():
                 if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
@@ -2964,7 +2998,7 @@ with tab_dvf:
                     fill=True, fill_color="#008493", fill_opacity=0.85,
                     popup=folium.Popup(popup_html, max_width=240),
                     tooltip=f"DVF — {_px_txt or 'prix inconnu'}",
-                ).add_to(_dvf_cluster)
+                ).add_to(_marker_target)
 
             components.html(dvf_map._repr_html_(), height=480, scrolling=False)
 

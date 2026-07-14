@@ -420,14 +420,67 @@ def _dvf_prix_m2(prix_total, surface_m2):
     return None
 
 
+def _resolve_insee(lat: float, lon: float, commune: str = "",
+                   code_postal: str = "") -> str | None:
+    """Résout le code INSEE d'une commune pour DVF, valable dans toute la France.
+
+    1) On interroge l'API Géo (gratuite) avec les coordonnées → code commune.
+    2) Cas particulier Paris / Lyon / Marseille : l'API renvoie le code « ville »
+       (75056 / 69123 / 13055) qui n'a PAS de fichier DVF — DVF est découpé par
+       arrondissement. On convertit alors via le code postal :
+         Paris     CP 750xx → INSEE 751xx   (75008 → 75108)
+         Lyon      CP 6900x → INSEE 6938x   (69002 → 69382)
+         Marseille CP 130xx → INSEE 132xx   (13008 → 13208)
+    Repli sur le dictionnaire local puis Nantes si tout échoue.
+    """
+    code = None
+    try:
+        r = requests.get("https://geo.api.gouv.fr/communes",
+                         params={"lat": lat, "lon": lon, "fields": "code"},
+                         timeout=8, headers=_H)
+        if r.ok:
+            js = r.json()
+            if js:
+                code = js[0].get("code")
+    except Exception:
+        code = None
+
+    cp = str(code_postal or "").strip()
+
+    # Paris / Lyon / Marseille : convertir ville → arrondissement via le CP
+    _city_to_arr = {
+        "75056": ("75", 100),   # Paris : 751xx
+        "69123": ("693", 380),  # Lyon : 6938x (arr = 380 + n° arrondissement)
+        "13055": ("132", 200),  # Marseille : 132xx
+    }
+    if code in _city_to_arr and len(cp) == 5:
+        prefix, base = _city_to_arr[code]
+        try:
+            arr = int(cp[-2:])  # 2 derniers chiffres du CP = n° arrondissement
+            if code == "75056":
+                return f"751{arr:02d}"        # 75008 → 75108
+            if code == "13055":
+                return f"132{arr:02d}"        # 13008 → 13208
+            if code == "69123":
+                return f"693{80 + arr:02d}"   # 69002 → 69382
+        except ValueError:
+            pass
+
+    if code:
+        return code
+
+    # Replis : dictionnaire local puis Nantes
+    return COMMUNE_INSEE.get(commune, "44109")
+
+
 def get_dvf_transactions(
     lat: float, lon: float, radius_m: float = 2000,
     commune: str = "Nantes", types_locaux: set | None = None,
-    annees: int = 5,
+    annees: int = 5, code_postal: str = "",
 ) -> pd.DataFrame:
     if types_locaux is None:
         types_locaux = LOCAL_TERTIAIRE
-    code = COMMUNE_INSEE.get(commune, "44109")
+    code = _resolve_insee(lat, lon, commune, code_postal)
     raw  = download_dvf_commune(code)
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -482,6 +535,7 @@ def get_dvf_transactions(
 def get_dvf_commune_complete(
     commune: str = "Nantes", types_locaux: set | None = None,
     annees: int = 5, ref_lat: float | None = None, ref_lon: float | None = None,
+    code_postal: str = "",
 ) -> pd.DataFrame:
     """
     Retourne TOUTES les transactions DVF d'une commune (pas de filtre par rayon),
@@ -501,7 +555,10 @@ def get_dvf_commune_complete(
     """
     if types_locaux is None:
         types_locaux = LOCAL_TERTIAIRE
-    code = COMMUNE_INSEE.get(commune, "44109")
+    if ref_lat is not None and ref_lon is not None:
+        code = _resolve_insee(ref_lat, ref_lon, commune, code_postal)
+    else:
+        code = COMMUNE_INSEE.get(commune, "44109")
     raw  = download_dvf_commune(code)
     if raw is None or raw.empty:
         return pd.DataFrame()
