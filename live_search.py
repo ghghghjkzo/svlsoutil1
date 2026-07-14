@@ -979,6 +979,10 @@ def search_cbre(commune: str, code_postal: str, operation: str = "location",
         departement = departement or _dept
         region = region or _reg
     url = f"https://immobilier.cbre.fr/{op}-{tb}/{region}/{departement}/{slug}.aspx"
+    # Villes-départements (Paris) : dept == commune → CBRE n'a pas le double
+    # niveau, l'URL est region/commune.aspx directement (sinon 404).
+    if departement == slug:
+        url = f"https://immobilier.cbre.fr/{op}-{tb}/{region}/{slug}.aspx"
     return _run_search(url, "CBRE.fr (non vérifié)", commune, code_postal, type_bien,
                        max_pages=max_pages)
 
