@@ -1360,7 +1360,7 @@ if "dossier_loaded" not in st.session_state:
 
 # ── Bandeau dossier actif (en haut, au-dessus de tout le reste) ────────────
 _meta = st.session_state.get("active_dossier_meta", {})
-_bcol1, _bcol2, _bcol3, _bcol4, _bcol5 = st.columns([4, 1, 1, 1, 1])
+_bcol1, _bcol2, _bcol3, _bcol4 = st.columns([4, 1, 1, 1])
 with _bcol1:
     st.markdown(
         f"<div style='background:#FAFBFC;border:1px solid #E6E8EC;"
@@ -1373,7 +1373,7 @@ with _bcol1:
         unsafe_allow_html=True,
     )
 with _bcol2:
-    if st.button("💾 Sauvegarder", use_container_width=True):
+    if st.button("💾 Save", use_container_width=True):
         ok = dossiers.save_dossier_data(
             st.session_state.active_dossier_id,
             dossiers.snapshot_session_state(st.session_state),
@@ -1410,31 +1410,6 @@ with _bcol3:
         st.button("📊 Excel", disabled=True, use_container_width=True,
                    help="Lance d'abord une recherche pour avoir des comparables à exporter.")
 with _bcol4:
-    # Export du dossier complet en JSON — inclut tous les comparables, résultats DVF,
-    # et métadonnées. Réimportable ou consultable hors ligne.
-    _export_payload = {
-        "dossier": {
-            "nom_client": _meta.get("nom_client"),
-            "adresse":    _meta.get("adresse"),
-            "type_bien":  _meta.get("type_bien"),
-            "statut":     _meta.get("statut"),
-            "created_at": _meta.get("created_at"),
-            "updated_at": _meta.get("updated_at"),
-        },
-        "data": dossiers.snapshot_session_state(st.session_state),
-    }
-    import json as _json_mod
-    _export_bytes = _json_mod.dumps(_export_payload, ensure_ascii=False, indent=2,
-                                    default=str).encode("utf-8")
-    _safe_name = "".join(c if c.isalnum() else "_" for c in
-                         (_meta.get("nom_client") or "dossier"))[:40]
-    st.download_button(
-        "📤 JSON", _export_bytes,
-        file_name=f"dossier_{_safe_name}.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-with _bcol5:
     if st.button("📂 Changer", use_container_width=True):
         st.session_state.active_dossier_id = None
         st.session_state.dossier_loaded = False
@@ -1813,48 +1788,32 @@ t_lat, t_lon, t_label = target["lat"], target["lon"], target["label"]
 radius_m = radius_km * 1000
 
 # ---------------------------------------------------------------- géocodage des comps
-# Le géocodage est mis en cache par session : sans ça, la boucle (avec ses
-# pauses réseau) se ré-exécutait à CHAQUE rerun Streamlit (interaction avec un
-# tableau éditable, rechargement de carte…), gardant l'app bloquée en état
-# « RUNNING » — d'où l'overlay gris permanent. On ne recalcule que si le jeu
-# de comparables ou la cible a changé.
-_geo_signature = (
-    t_lat, t_lon, len(df),
-    hash(tuple(df.get("Adresse", pd.Series(dtype=str)).fillna("").astype(str)))
-    if not df.empty else 0,
-)
-if st.session_state.get("_geo_sig") == _geo_signature and "_geo_cache" in st.session_state:
-    # Réutilise le géocodage déjà calculé (pas de re-boucle, pas de sleep)
-    lats, lons, dists = st.session_state["_geo_cache"]
-else:
-    progress = st.progress(0.0, text="Géocodage des comparables…")
-    lats, lons, dists = [], [], []
-    for i, row_ in df.iterrows():
-        lat = to_num(row_.get("Latitude"))
-        lon = to_num(row_.get("Longitude"))
-        if lat is None or lon is None:
-            addr_val = str(row_.get("Adresse", "") or "")
-            # n'inclure l'adresse que si elle contient vraiment une info de rue
-            addr_clean = "" if any(x in addr_val.lower() for x in
-                                   ("non disponible", "non extraite", "adresse précise")) \
-                         else addr_val.strip()
-            commune = str(row_.get("Commune", "") or "").strip()
-            cp      = str(row_.get("Code_postal", "") or "").strip()
-            # construire la query en garantissant qu'on a au moins la commune
-            parts = [p for p in [addr_clean, cp, commune] if p and p != "Non disponible"]
-            q = " ".join(parts)
-            g = geocode(q) if q else None
-            if g:
-                lat, lon = g["lat"], g["lon"]
-        # stocker None explicitement (pas NaN) pour les coords manquantes
-        lats.append(float(lat) if lat is not None else None)
-        lons.append(float(lon) if lon is not None else None)
-        dists.append(haversine_m(t_lat, t_lon, lat, lon)
-                     if (lat is not None and lon is not None) else None)
-        progress.progress((i + 1) / max(len(df), 1), text=f"Géocodage… {i+1}/{len(df)}")
-    progress.empty()
-    st.session_state["_geo_cache"] = (lats, lons, dists)
-    st.session_state["_geo_sig"] = _geo_signature
+# Géocodage direct. geocode() est déjà mis en cache (@lru_cache) donc les
+# adresses répétées sont instantanées ; pas de sleep (inutile et lent).
+progress = st.progress(0.0, text="Géocodage des comparables…")
+lats, lons, dists = [], [], []
+for i, row_ in df.iterrows():
+    lat = to_num(row_.get("Latitude"))
+    lon = to_num(row_.get("Longitude"))
+    if lat is None or lon is None:
+        addr_val = str(row_.get("Adresse", "") or "")
+        # n'inclure l'adresse que si elle contient vraiment une info de rue
+        addr_clean = "" if any(x in addr_val.lower() for x in
+                               ("non disponible", "non extraite", "adresse précise")) \
+                     else addr_val.strip()
+        commune = str(row_.get("Commune", "") or "").strip()
+        cp      = str(row_.get("Code_postal", "") or "").strip()
+        parts = [p for p in [addr_clean, cp, commune] if p and p != "Non disponible"]
+        q = " ".join(parts)
+        g = geocode(q) if q else None
+        if g:
+            lat, lon = g["lat"], g["lon"]
+    lats.append(float(lat) if lat is not None else None)
+    lons.append(float(lon) if lon is not None else None)
+    dists.append(haversine_m(t_lat, t_lon, lat, lon)
+                 if (lat is not None and lon is not None) else None)
+    progress.progress((i + 1) / max(len(df), 1), text=f"Géocodage… {i+1}/{len(df)}")
+progress.empty()
 
 df["_lat"], df["_lon"], df["_dist"] = lats, lons, dists
 
@@ -2875,8 +2834,15 @@ with tab_dvf:
                 return " · ".join(parts) if parts else "—"
             dvf_df["Commentaire"] = dvf_df.apply(_dvf_comment, axis=1)
 
-            # Métriques de synthèse
-            stats = apis.dvf_summary(dvf_df)
+            # Métriques de synthèse — calculées ici (pas via apis.dvf_summary)
+            # pour que le prix min/max/médian s'affiche sans dépendre du module
+            # apis (rechargement direct au F5).
+            _vals = dvf_df["Prix/m²"].dropna() if "Prix/m²" in dvf_df.columns else pd.Series(dtype=float)
+            stats = {} if _vals.empty else {
+                "n": len(dvf_df), "median": _vals.median(), "mean": _vals.mean(),
+                "min": _vals.min(), "max": _vals.max(),
+                "q1": _vals.quantile(0.25), "q3": _vals.quantile(0.75),
+            }
             if stats:
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Transactions", stats["n"])
