@@ -3151,10 +3151,13 @@ with tab_dvf:
                     st.caption(f"📐 Surface ≥ {_surf_min} m² : "
                                f"{_n_avant_surf} → {len(dvf_df)} transaction(s).")
 
+            # PAS de st.stop() ici : il interromprait TOUT le script, donc la
+            # carte DVF plus bas et les onglets suivants (Targomo, Urbanisme)
+            # ne seraient jamais rendus. Un df vide est géré naturellement par
+            # le code en aval (tableau et carte vides), on se contente d'avertir.
             if dvf_df.empty:
                 st.warning("Aucune transaction ne passe les filtres — abaisse la "
                            "surface minimum.")
-                st.stop()
 
             if not surface_target:
                 st.caption("💡 Renseigne la **surface de l'actif** (section 1) pour "
