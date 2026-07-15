@@ -1422,6 +1422,7 @@ if "dossier_loaded" not in st.session_state:
         dossiers.restore_session_state(full.get("data") or {}, st.session_state)
     st.session_state.dossier_loaded = True
     st.session_state.portal_dismissed = False  # nouveau dossier chargé → montrer le portail s'il a des données
+    st.session_state.pop("portal_xlsx", None)     # purge l'export du dossier précédent
     # Fix : le widget radio "mode" garde en mémoire la dernière valeur choisie
     # pour toute la session navigateur — sans ce reset explicite, changer de
     # dossier n'actualise pas le mode et force à relancer une recherche à vide.
@@ -1469,24 +1470,31 @@ if (_has_offres or _has_dvf) and not st.session_state.portal_dismissed:
             st.button("🏛️ Export DVF", disabled=True, use_container_width=True,
                       help="Aucune transaction DVF dans ce dossier.")
 
-    # Export Offres (Excel) — réutilise build_export_table/export_to_excel_bytes
+    # Export Offres (Excel) — généré à la demande : la construction télécharge
+    # les photos et prend plusieurs secondes ; la faire au chargement retardait
+    # l'affichage des autres boutons. Premier clic = génère, second = télécharge.
     with _pc2:
         if _has_offres:
-            try:
-                _dfo = pd.DataFrame(st.session_state["live_results"])
-                _nv = _dfo.get("Prix_vente_eur_m2", pd.Series(dtype=float)).apply(to_num).notna().sum()
-                _nl = _dfo.get("Loyer_facial_eur_m2_an", pd.Series(dtype=float)).apply(to_num).notna().sum()
-                _opi = "Vente" if _nv > _nl else "Location"
-                _xo = export_to_excel_bytes(build_export_table(_dfo, operation=_opi),
-                                            title=f"Offres — {_pmeta.get('nom_client','Dossier')}",
-                                            operation=_opi)
-                st.download_button("📊 Export Offres", _xo,
+            if not st.session_state.get("portal_xlsx"):
+                if st.button("📊 Export Offres", use_container_width=True):
+                    with st.spinner("Génération du fichier…"):
+                        try:
+                            _dfo = pd.DataFrame(st.session_state["live_results"])
+                            _nv = _dfo.get("Prix_vente_eur_m2", pd.Series(dtype=float)).apply(to_num).notna().sum()
+                            _nl = _dfo.get("Loyer_facial_eur_m2_an", pd.Series(dtype=float)).apply(to_num).notna().sum()
+                            _opi = "Vente" if _nv > _nl else "Location"
+                            st.session_state.portal_xlsx = export_to_excel_bytes(
+                                build_export_table(_dfo, operation=_opi),
+                                title=f"Offres — {_pmeta.get('nom_client','Dossier')}",
+                                operation=_opi)
+                            st.rerun()
+                        except Exception as _pe:
+                            st.error(f"Export indisponible : {_pe}")
+            else:
+                st.download_button("⬇️ Télécharger", st.session_state.portal_xlsx,
                                    file_name="offres.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True)
-            except Exception as _pe:
-                st.button("📊 Export Offres", disabled=True, use_container_width=True,
-                          help=f"Export indisponible : {_pe}")
         else:
             st.button("📊 Export Offres", disabled=True, use_container_width=True,
                       help="Aucune offre dans ce dossier.")
@@ -1555,6 +1563,7 @@ with _bcol4:
         st.session_state.active_dossier_id = None
         st.session_state.dossier_loaded = False
         st.session_state.portal_dismissed = False  # réafficher le portail au prochain dossier
+        st.session_state.pop("portal_xlsx", None)     # purge l'export du dossier précédent
         st.session_state.pop("mode_radio_key", None)  # resynchronise le mode au prochain dossier
         st.rerun()
 
@@ -1670,10 +1679,20 @@ with st.sidebar:
             help="1 page ≈ 30 annonces (BureauxLocaux). "
                  "3 pages = ~90 annonces. Plus de pages = plus long (~0.4s/page).",
         )
-        only_complete = st.checkbox(
-            "Ne garder que les annonces complètes (adresse précise + prix exploitable)",
-            value=True,
+        st.caption("**Filtres qualité** — appliqués aux annonces récupérées :")
+        _req_addr = st.checkbox(
+            "Exiger une adresse précise",
+            value=False, key="req_addr",
+            help="Écarte les annonces localisées seulement à la commune ou à "
+                 "l'arrondissement (fréquent en tertiaire : l'agence masque "
+                 "l'adresse). Attention : très restrictif sur Paris.",
         )
+        _req_price = st.checkbox(
+            "Exiger un prix exploitable",
+            value=True, key="req_price",
+            help="Écarte les annonces sans loyer ni prix de vente lisible.",
+        )
+        only_complete = _req_addr and _req_price  # rétro-compat avec filter_complete
         if st.button("Lancer la recherche en direct", disabled=not target):
             st.session_state.live_go = True
         run_live = st.session_state.get("live_go", False)
@@ -1812,7 +1831,16 @@ else:
         n_geocodable  = sum(1 for x in merged
                             if x.get("Commune") not in ("Non disponible", "", None))
         n_complets    = sum(1 for x in merged if x.get("Complete"))
-        filtered      = live_search.filter_complete(merged) if only_complete else merged
+        # Filtres qualité indépendants : l'utilisateur choisit d'exiger l'adresse
+        # précise, le prix exploitable, les deux, ou aucun.
+        filtered = merged
+        if _req_addr:
+            filtered = [x for x in filtered if x.get("Adresse_precise")]
+        if _req_price:
+            filtered = [x for x in filtered
+                        if (to_num(x.get("Loyer_HT_HC_eur_m2_an"))
+                            or to_num(x.get("Loyer_facial_eur_m2_an"))
+                            or to_num(x.get("Prix_vente_eur_m2")))]
 
         # stockage
         st.session_state.live_results = filtered
@@ -3009,9 +3037,14 @@ with tab_dvf:
             if _loyer_marche_m2:
                 def _taux_rendement(row):
                     prix_m2 = to_num(row.get("Prix/m²"))
-                    if prix_m2 and prix_m2 > 0:
-                        return round(_loyer_marche_m2 / prix_m2 * 100, 2)
-                    return None
+                    if not prix_m2 or prix_m2 <= 0:
+                        return None
+                    _t = round(_loyer_marche_m2 / prix_m2 * 100, 2)
+                    # Garde-fou : un rendement hors de [1 % ; 25 %] n'a pas de sens
+                    # économique en tertiaire — il traduit un prix/m² aberrant
+                    # (vente entre parties liées, lot mal renseigné…). On l'écarte
+                    # plutôt que d'afficher un taux trompeur.
+                    return _t if 1.0 <= _t <= 25.0 else None
                 dvf_df["Taux rendement estimé (%)"] = dvf_df.apply(_taux_rendement, axis=1)
                 st.caption(
                     f"📐 Taux de rendement estimé = loyer médian de marché "
@@ -3065,6 +3098,48 @@ with tab_dvf:
             st.caption("Chaque transaction est notée sur sa comparabilité à l'actif "
                        "(distance, écart de surface, ancienneté). Ajuste les poids "
                        "selon ce qui compte le plus pour cette valorisation.")
+
+            # Filtres amont : surface plancher + retrait des prix aberrants
+            _fc1, _fc2 = st.columns([1, 2])
+            with _fc1:
+                _surf_min = st.number_input(
+                    "Surface minimum (m²)", min_value=0, max_value=40000,
+                    value=0, step=10, key="dvf_surf_min",
+                    help="Exclut les petits lots (caves, parkings…) qui faussent "
+                         "les prix au m². 0 = pas de filtre.",
+                )
+            with _fc2:
+                _drop_outliers = st.checkbox(
+                    "Exclure les prix/m² aberrants (méthode interquartile)",
+                    value=True, key="dvf_drop_outliers",
+                    help="Retire les valeurs hors de [Q1 − 1,5×IQR ; Q3 + 1,5×IQR]. "
+                         "S'adapte au marché local, contrairement à un seuil fixe.",
+                )
+
+            _n_avant = len(dvf_df)
+            if _surf_min > 0 and "Surface (m²)" in dvf_df.columns:
+                dvf_df = dvf_df[dvf_df["Surface (m²)"].fillna(0) >= _surf_min]
+
+            _n_outliers = 0
+            if _drop_outliers and "Prix/m²" in dvf_df.columns and len(dvf_df) >= 8:
+                _v = dvf_df["Prix/m²"].dropna()
+                if len(_v) >= 8:
+                    _q1, _q3 = _v.quantile(0.25), _v.quantile(0.75)
+                    _iqr = _q3 - _q1
+                    _lo, _hi = _q1 - 1.5 * _iqr, _q3 + 1.5 * _iqr
+                    _mask_ok = dvf_df["Prix/m²"].isna() | dvf_df["Prix/m²"].between(_lo, _hi)
+                    _n_outliers = int((~_mask_ok).sum())
+                    dvf_df = dvf_df[_mask_ok]
+                    if _n_outliers:
+                        st.caption(f"🧹 {_n_outliers} valeur(s) aberrante(s) exclue(s) "
+                                   f"— hors de [{_lo:,.0f} ; {_hi:,.0f}] €/m²".replace(",", "\u202f"))
+            if len(dvf_df) < _n_avant:
+                st.caption(f"Filtres : {_n_avant} → **{len(dvf_df)}** transaction(s).")
+            if dvf_df.empty:
+                st.warning("Aucune transaction ne passe les filtres — abaisse la "
+                           "surface minimum ou décoche l'exclusion des aberrants.")
+                st.stop()
+
             _wc1, _wc2, _wc3, _wc4 = st.columns(4)
             with _wc1:
                 _w_dist = st.slider("Poids distance", 0.0, 3.0, 1.0, 0.5, key="w_dist")
@@ -3073,7 +3148,11 @@ with tab_dvf:
             with _wc3:
                 _w_date = st.slider("Poids récence", 0.0, 3.0, 1.0, 0.5, key="w_date")
             with _wc4:
-                _n_max = st.slider("Nb transactions max", 1, 100, 20, 1, key="n_max_comp")
+                _all_tx = st.checkbox("ALL", value=False, key="dvf_all",
+                                      help="Afficher toutes les transactions "
+                                           "(désactive la limite).")
+                _n_max = st.slider("Nb transactions max", 1, 100, 20, 1,
+                                   key="n_max_comp", disabled=_all_tx)
 
             if not surface_target:
                 st.caption("💡 Renseigne la **surface de l'actif** (section 1) pour "
@@ -3084,7 +3163,7 @@ with tab_dvf:
                 w_dist=_w_dist, w_surf=_w_surf, w_date=_w_date,
                 radius_max_m=dvf_radius_km * 1000,
             )
-            _dvf_top = _dvf_scored.head(_n_max)
+            _dvf_top = _dvf_scored if _all_tx else _dvf_scored.head(_n_max)
             st.info(f"**{len(_dvf_top)}** transaction(s) retenue(s) sur {len(dvf_df)} "
                     f"— score moyen {_dvf_top['Score'].mean():.0f}/100"
                     if not _dvf_top.empty and _dvf_top["Score"].notna().any()
