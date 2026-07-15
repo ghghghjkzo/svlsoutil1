@@ -48,6 +48,34 @@ def plur(n, singulier: str, pluriel: str | None = None) -> str:
 
 st.set_page_config(page_title="Valo — Valorisation", page_icon="🏢", layout="wide")
 
+# ── Verrou d'activité ─────────────────────────────────────────────────────
+# Streamlit rend l'interface AVANT d'exécuter les traitements longs : sans ce
+# verrou, l'utilisateur peut relancer une requête pendant qu'une autre tourne
+# (résultats mélangés, quotas API gaspillés). Le flag est posé au clic, le
+# rerun suivant désactive tous les déclencheurs, puis il est levé à la fin.
+if "busy" not in st.session_state:
+    st.session_state.busy = False
+
+
+def _lock():
+    """Pose le verrou et relance le script pour griser les commandes."""
+    st.session_state.busy = True
+
+
+def _unlock():
+    """Lève le verrou une fois le traitement terminé."""
+    st.session_state.busy = False
+
+
+def _busy_notice():
+    """Bandeau discret rappelant qu'un traitement est en cours."""
+    if st.session_state.get("busy"):
+        st.markdown(
+            "<div style='background:rgba(255,223,0,.08);border:1px solid rgba(255,223,0,.35);"
+            "border-radius:8px;padding:8px 12px;margin:4px 0;font-size:12.5px;color:#E6C900'>"
+            "⏳ Traitement en cours — les commandes sont temporairement désactivées."
+            "</div>", unsafe_allow_html=True)
+
 # ── Interrupteur d'authentification ───────────────────────────────────────
 # Portail de connexion actif. Passer à False pour un accès direct temporaire
 # (mais gérer alors la persistance des dossiers, cf. RLS Supabase).
@@ -1484,7 +1512,7 @@ if st.session_state.active_dossier_id is None:
             st.markdown('<div class="valo-fade">', unsafe_allow_html=True)
             for d in existing:
                 with st.container(border=True):
-                    _c1, _c2, _c3 = st.columns([5, 1.6, 1.6])
+                    _c1, _c2, _c3 = st.columns([4, 2, 1])
                     with _c1:
                         st.markdown(f"**{d.get('nom_client', 'Sans nom')}**")
                         _bits = [d.get("adresse") or "—", d.get("type_bien", "—"),
@@ -1500,28 +1528,14 @@ if st.session_state.active_dossier_id is None:
                             st.session_state.pop("mode_radio_key", None)
                             st.rerun()
                     with _c3:
-                        _dk = f"confirm_del_{d['id']}"
-                        if st.session_state.get(_dk):
-                            # Suppression définitive : on demande confirmation,
-                            # un dossier perdu n'est pas récupérable.
-                            st.caption("**Supprimer ?**")
-                            _y, _n = st.columns(2)
-                            with _y:
-                                if st.button("Oui", key=f"yes_{d['id']}",
-                                             use_container_width=True):
-                                    dossiers.delete_dossier(d["id"])
-                                    st.session_state.pop(_dk, None)
-                                    st.rerun()
-                            with _n:
-                                if st.button("Non", key=f"no_{d['id']}",
-                                             use_container_width=True):
-                                    st.session_state.pop(_dk, None)
-                                    st.rerun()
-                        else:
-                            if st.button("🗑️", key=f"del_{d['id']}",
-                                         use_container_width=True,
-                                         help="Supprimer ce dossier"):
-                                st.session_state[_dk] = True
+                        # popover plutôt que colonnes imbriquées : Streamlit
+                        # interdit d'imbriquer des colonnes sur 2 niveaux.
+                        with st.popover("🗑️", use_container_width=True):
+                            st.caption(f"Supprimer **{d.get('nom_client','ce dossier')}** ?")
+                            st.caption("Cette action est définitive.")
+                            if st.button("Oui, supprimer", key=f"yes_{d['id']}",
+                                         use_container_width=True):
+                                dossiers.delete_dossier(d["id"])
                                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
@@ -1692,6 +1706,7 @@ with _bcol4:
         st.rerun()
 
 with st.sidebar:
+    _busy_notice()
     st.header("1 — Actif à valoriser")
     _restored_addr = st.session_state.get("address_value", "")
     address = st.text_input("Adresse (recommandé pour la précision)",
@@ -1831,8 +1846,10 @@ with st.sidebar:
             help="Écarte les annonces sans loyer ni prix de vente lisible.",
         )
         only_complete = _req_addr and _req_price  # rétro-compat avec filter_complete
-        if st.button("Lancer la recherche en direct", disabled=not target):
+        if st.button("Lancer la recherche en direct",
+                     disabled=(not target) or st.session_state.busy):
             st.session_state.live_go = True
+            _lock()
         run_live = st.session_state.get("live_go", False)
 
     # ── Section APIs ──────────────────────────────────────────────────
@@ -1863,8 +1880,9 @@ with st.sidebar:
             default=[5, 10, 15],
         )
         if st.button("Calculer les isochrones",
-                     disabled=not (target and targomo_key)):
+                     disabled=(not (target and targomo_key)) or st.session_state.busy):
             st.session_state.targomo_go = True
+            _lock()
         run_targomo = st.session_state.get("targomo_go", False)
 
     with st.expander("🏛️ DVF (transactions notariales)", expanded=False):
@@ -1903,19 +1921,22 @@ with st.sidebar:
         )
         if st.button(
             "Charger les transactions DVF",
-            disabled=not target or (dvf_source.startswith("SOGEFI") and not sogefi_key),
+            disabled=(not target) or st.session_state.busy
+                     or (dvf_source.startswith("SOGEFI") and not sogefi_key),
         ):
             st.session_state.dvf_go = True
+            _lock()
         run_dvf = st.session_state.get("dvf_go", False)
         run_dvf_commune = False
         if not dvf_source.startswith("SOGEFI"):
             if st.button(
                 "🗺️ Cartographier toute la commune",
-                disabled=not target,
+                disabled=(not target) or st.session_state.busy,
                 help="Affiche TOUTES les transactions de la commune (pas seulement "
                      "celles dans le rayon) — gratuit, aucun coût de quota.",
             ):
                 st.session_state.dvf_commune_go = True
+                _lock()
             run_dvf_commune = st.session_state.get("dvf_commune_go", False)
 
 if mode == "Charger un fichier Excel":
@@ -1944,6 +1965,7 @@ else:
     search_cp = target.get("postcode") or manual_cp.strip() or "44000"
     if run_live:
         st.session_state.live_go = False  # consomme le flag : une recherche par clic
+        _unlock()
         ops_to_search = ["Location", "Vente"] if op.startswith("Tous") else [op]
         types_to_search = ["Bureaux", "Activités", "Commerce"] if asset_type == "Tous" else [asset_type]
         n_sources = len(selected_sources) if selected_sources else len(live_search.ALL_SOURCES)
@@ -3093,6 +3115,7 @@ with tab_dvf:
 
         if run_dvf:
             st.session_state.dvf_go = False  # consomme le flag : une requête par clic
+            _unlock()
             if dvf_source.startswith("SOGEFI"):
                 with st.spinner("Interrogation SOGEFI DVF+…"):
                     result = apis.fetch_sogefi_mutations(
@@ -3151,6 +3174,7 @@ with tab_dvf:
 
         if run_dvf_commune:
             st.session_state.dvf_commune_go = False  # consomme le flag
+            _unlock()
             with st.spinner(f"Téléchargement de toutes les transactions de {search_commune_dvf}…"):
                 try:
                     commune_df = apis.get_dvf_commune_complete(
@@ -3369,6 +3393,21 @@ with tab_dvf:
 
             # Carte DVF
             st.subheader("Carte des transactions")
+
+            # Diagnostic : rend visible ce que la carte reçoit réellement.
+            # À retirer quand le rendu sera stabilisé.
+            with st.expander("🔍 Diagnostic carte", expanded=False):
+                st.write({
+                    "transactions_a_afficher": len(dvf_df),
+                    "colonnes": list(dvf_df.columns),
+                    "_lat_present": "_lat" in dvf_df.columns,
+                    "_lon_present": "_lon" in dvf_df.columns,
+                    "coords_valides": (
+                        int(dvf_df["_lat"].notna().sum()) if "_lat" in dvf_df.columns else 0
+                    ),
+                    "cible": [t_lat, t_lon],
+                })
+
             # Contours cadastraux tracés automatiquement quand la sélection est
             # restreinte (≤30) : une requête IGN par transaction, donc impossible
             # sur de gros volumes. Au-delà, seuls les points sont affichés.
@@ -3399,9 +3438,11 @@ with tab_dvf:
             else:
                 _marker_target = dvf_map
 
+            _n_markers = 0
             for _, row in dvf_df.iterrows():
                 if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
                     continue
+                _n_markers += 1
                 px = row.get("Prix/m²")
                 # NaN est truthy → tester pd.notna avant round(px), sinon
                 # "cannot convert float NaN to integer" (bug carte transactions)
@@ -3460,7 +3501,11 @@ with tab_dvf:
                     st.caption(f"🗺️ {plur(_n_parc, 'parcelle cadastrale tracée', 'parcelles cadastrales tracées')}.")
 
             try:
-                components.html(dvf_map._repr_html_(), height=480, scrolling=False)
+                _map_html = dvf_map._repr_html_()
+                st.caption(f"🔍 {_n_markers} marqueur(s) ajouté(s) · "
+                           f"HTML {len(_map_html)//1000} Ko · "
+                           f"{'cluster' if _n_valid > 200 else 'direct'}")
+                components.html(_map_html, height=480, scrolling=False)
             except Exception as _map_err:
                 # Rendre l'échec visible plutôt que d'afficher une zone vide :
                 # un écran blanc sans message est indébogable côté utilisateur.
@@ -3594,6 +3639,7 @@ with tab_targomo:
 
         if run_targomo:
             st.session_state.targomo_go = False  # consomme le flag : une requête par clic
+            _unlock()
             for mode in (targomo_modes or ["walk"]):
                 with st.spinner(f"Calcul isochrones — {apis.TRAVEL_MODES.get(mode, mode)}…"):
                     result = apis.fetch_isochrones(
