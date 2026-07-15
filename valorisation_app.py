@@ -14,6 +14,7 @@ basse/cible/haute pondérée.
 """
 
 import io
+import json
 import math
 import re
 import time
@@ -943,6 +944,65 @@ def to_num(v):
         return None
 
 
+def score_comparables(df: pd.DataFrame, surface_ref: float | None = None,
+                      w_dist: float = 1.0, w_surf: float = 1.0, w_date: float = 1.0,
+                      radius_max_m: float = 2000) -> pd.DataFrame:
+    """Note chaque transaction sur sa comparabilité à l'actif de référence.
+
+    Trois sous-scores 0-100, combinés selon les poids fournis :
+      • Distance   : 100 au pied de l'actif, 0 au-delà du rayon de recherche
+      • Surface    : 100 si surface identique, décroît avec l'écart relatif
+                     (une surface 2× plus grande/petite tombe à ~0)
+      • Ancienneté : 100 pour la vente la plus récente du lot, décroît
+                     linéairement vers la plus ancienne
+
+    Un critère non calculable (donnée absente) est neutralisé : son poids est
+    retiré du total plutôt que de pénaliser la ligne. Retourne le df avec une
+    colonne "Score" (0-100), trié du plus au moins comparable.
+    """
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+
+    # ── distance ─────────────────────────────────────────────────────────
+    _d = out["distance_m"] if "distance_m" in out.columns else pd.Series(dtype=float)
+    if not _d.empty and _d.notna().any() and radius_max_m > 0:
+        s_dist = (1 - (_d.astype(float) / radius_max_m)).clip(0, 1) * 100
+    else:
+        s_dist = pd.Series([None] * len(out), index=out.index)
+
+    # ── surface ──────────────────────────────────────────────────────────
+    _s = out["Surface (m²)"] if "Surface (m²)" in out.columns else pd.Series(dtype=float)
+    if surface_ref and surface_ref > 0 and not _s.empty and _s.notna().any():
+        _ratio = _s.astype(float) / float(surface_ref)
+        # écart relatif symétrique : 1.0 → 0 d'écart ; 2.0 ou 0.5 → écart 1.0
+        _ecart = _ratio.apply(lambda r: abs(r - 1) if r >= 1 else abs(1 / r - 1)
+                              if r and r > 0 else None)
+        s_surf = (1 - _ecart.clip(0, 1)) * 100
+    else:
+        s_surf = pd.Series([None] * len(out), index=out.index)
+
+    # ── ancienneté ───────────────────────────────────────────────────────
+    _dt = pd.to_datetime(out["Date"], errors="coerce") if "Date" in out.columns else pd.Series(dtype="datetime64[ns]")
+    if not _dt.empty and _dt.notna().any():
+        _min, _max = _dt.min(), _dt.max()
+        _span = (_max - _min).days or 1
+        s_date = _dt.apply(lambda d: ((d - _min).days / _span) * 100
+                           if pd.notna(d) else None)
+    else:
+        s_date = pd.Series([None] * len(out), index=out.index)
+
+    # ── combinaison pondérée, en ignorant les critères non calculables ───
+    def _combine(i):
+        pairs = [(s_dist.get(i), w_dist), (s_surf.get(i), w_surf), (s_date.get(i), w_date)]
+        num = sum(v * w for v, w in pairs if v is not None and pd.notna(v) and w > 0)
+        den = sum(w for v, w in pairs if v is not None and pd.notna(v) and w > 0)
+        return round(num / den, 1) if den else None
+
+    out["Score"] = [_combine(i) for i in out.index]
+    return out.sort_values("Score", ascending=False, na_position="last")
+
+
 # ------------------------------------------------- extraction type de bail / preneur
 BAIL_RE = re.compile(r"bail\s+(commercial|d[ée]rogatoire|professionnel)\s*(\d/\d/\d)?", re.I)
 PRENEUR_RE = re.compile(r"lou[ée]\s+(?:à|a)\s+(?:la\s+soci[ée]t[ée]\s+)?([A-ZÀ-Ü][\w\-' ]{2,40})", re.I)
@@ -1491,7 +1551,7 @@ with _bcol3:
         st.button("📊 Excel", disabled=True, use_container_width=True,
                    help="Lance d'abord une recherche pour avoir des comparables à exporter.")
 with _bcol4:
-    if st.button("📂 Changer", use_container_width=True):
+    if st.button("📂 Change", use_container_width=True):
         st.session_state.active_dossier_id = None
         st.session_state.dossier_loaded = False
         st.session_state.portal_dismissed = False  # réafficher le portail au prochain dossier
@@ -2813,7 +2873,6 @@ out center;"""
     components.html(em._repr_html_(), height=520, scrolling=False)
     st.caption("🔴 Actif · 🔵 Tram · 🟦 Bus · 🟠 Restos · 🟣 Hôtels · 🟢 Sport · 💚 Banques")
 
-
 # ══════════════════════════════════════════════════════════════════════════
 # ONGLET 4 — DVF : transactions notariales réelles
 # ══════════════════════════════════════════════════════════════════════════
@@ -3001,9 +3060,50 @@ with tab_dvf:
                 + f" · Moyenne : {stats.get('mean',0):,.0f} €/m²".replace(",", "\u202f")
             )
 
+            # ── Sélection des comparables les plus pertinents ──────────────
+            st.subheader("🎯 Comparables les plus pertinents")
+            st.caption("Chaque transaction est notée sur sa comparabilité à l'actif "
+                       "(distance, écart de surface, ancienneté). Ajuste les poids "
+                       "selon ce qui compte le plus pour cette valorisation.")
+            _wc1, _wc2, _wc3, _wc4 = st.columns(4)
+            with _wc1:
+                _w_dist = st.slider("Poids distance", 0.0, 3.0, 1.0, 0.5, key="w_dist")
+            with _wc2:
+                _w_surf = st.slider("Poids surface", 0.0, 3.0, 1.0, 0.5, key="w_surf")
+            with _wc3:
+                _w_date = st.slider("Poids récence", 0.0, 3.0, 1.0, 0.5, key="w_date")
+            with _wc4:
+                _n_max = st.slider("Nb transactions max", 1, 100, 20, 1, key="n_max_comp")
+
+            if not surface_target:
+                st.caption("💡 Renseigne la **surface de l'actif** (section 1) pour "
+                           "activer le critère de comparabilité par surface.")
+
+            _dvf_scored = score_comparables(
+                dvf_df, surface_ref=(surface_target or None),
+                w_dist=_w_dist, w_surf=_w_surf, w_date=_w_date,
+                radius_max_m=dvf_radius_km * 1000,
+            )
+            _dvf_top = _dvf_scored.head(_n_max)
+            st.info(f"**{len(_dvf_top)}** transaction(s) retenue(s) sur {len(dvf_df)} "
+                    f"— score moyen {_dvf_top['Score'].mean():.0f}/100"
+                    if not _dvf_top.empty and _dvf_top["Score"].notna().any()
+                    else f"**{len(_dvf_top)}** transaction(s) retenue(s).")
+
+            # Stats recalculées sur la sélection (plus pertinent que sur tout)
+            _vsel = _dvf_top["Prix/m²"].dropna() if "Prix/m²" in _dvf_top.columns else pd.Series(dtype=float)
+            if not _vsel.empty:
+                _sc1, _sc2, _sc3 = st.columns(3)
+                _sc1.metric("Médiane sélection", f"{_vsel.median():,.0f} €/m²".replace(",", "\u202f"))
+                _sc2.metric("Min sélection", f"{_vsel.min():,.0f} €/m²".replace(",", "\u202f"))
+                _sc3.metric("Max sélection", f"{_vsel.max():,.0f} €/m²".replace(",", "\u202f"))
+
+            # Le tableau et la carte portent désormais sur la sélection
+            dvf_df = _dvf_top
+
             # Tableau éditable — colonnes essentielles uniquement, ordre curé
             st.subheader("Détail des transactions")
-            _priority_order = ["Date", "Type", "Nature", "Surface (m²)", "Adresse",
+            _priority_order = ["Score", "Date", "Type", "Nature", "Surface (m²)", "Adresse",
                                "Commune", "Prix total (€)", "Prix/m²",
                                "Taux rendement estimé (%)", "Commentaire"]
             _visible_cols = [c for c in _priority_order if c in dvf_df.columns]
@@ -3015,6 +3115,11 @@ with tab_dvf:
             col_cfg = {c: st.column_config.NumberColumn(format="%.0f") for c in num_cols if c in dvf_df.columns}
             if "Taux rendement estimé (%)" in dvf_df.columns:
                 col_cfg["Taux rendement estimé (%)"] = st.column_config.NumberColumn(format="%.2f %%")
+            if "Score" in dvf_df.columns:
+                col_cfg["Score"] = st.column_config.ProgressColumn(
+                    "Score", format="%.0f", min_value=0, max_value=100,
+                    help="Comparabilité à l'actif : 100 = très comparable",
+                )
             dvf_df_edited = st.data_editor(
                 dvf_df[_visible_cols], use_container_width=True, hide_index=True,
                 column_config=col_cfg, key="dvf_editor",
@@ -3023,6 +3128,17 @@ with tab_dvf:
 
             # Carte DVF
             st.subheader("Carte des transactions")
+            _show_parcelles = st.checkbox(
+                "🗺️ Afficher le contour cadastral des parcelles",
+                value=False,
+                help="Trace le plan de la parcelle autour de chaque transaction "
+                     "affichée. Une requête IGN par transaction : à réserver aux "
+                     "sélections restreintes (≤ 30).",
+                disabled=len(dvf_df) > 30,
+            )
+            if len(dvf_df) > 30:
+                st.caption("💡 Réduis « Nb transactions max » à 30 ou moins pour "
+                           "pouvoir afficher les contours cadastraux.")
             dvf_map = folium.Map(location=[t_lat, t_lon], zoom_start=14, tiles=None)
             folium.TileLayer(
                 "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -3070,6 +3186,39 @@ with tab_dvf:
                     popup=folium.Popup(popup_html, max_width=240),
                     tooltip=f"DVF — {_px_txt or 'prix inconnu'}",
                 ).add_to(_marker_target)
+
+            # ── Contours cadastraux des parcelles (option) ────────────────
+            # Une requête IGN par transaction → réservé aux petites sélections.
+            if _show_parcelles and len(dvf_df) <= 30:
+                _n_parc = 0
+                with st.spinner("Récupération des parcelles cadastrales…"):
+                    for _, row in dvf_df.iterrows():
+                        if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
+                            continue
+                        _pj = apis.fetch_parcelle_geometry(float(row["_lat"]), float(row["_lon"]))
+                        if not _pj:
+                            continue
+                        try:
+                            _pdata = json.loads(_pj)
+                        except Exception:
+                            continue
+                        _sect = _pdata.get("section", "")
+                        _num = _pdata.get("numero", "")
+                        _cont = _pdata.get("contenance")
+                        _tip = f"Parcelle {_sect} {_num}"
+                        if _cont:
+                            _tip += f" — {_cont:,} m²".replace(",", "\u202f")
+                        folium.GeoJson(
+                            _pdata["geometry"],
+                            style_function=lambda _f: {
+                                "fillColor": "#008493", "color": "#25273A",
+                                "weight": 2, "fillOpacity": 0.12,
+                            },
+                            tooltip=_tip,
+                        ).add_to(dvf_map)
+                        _n_parc += 1
+                if _n_parc:
+                    st.caption(f"🗺️ {_n_parc} parcelle(s) cadastrale(s) tracée(s).")
 
             components.html(dvf_map._repr_html_(), height=480, scrolling=False)
 
@@ -3309,8 +3458,17 @@ with tab_urba:
         with c3:
             st.markdown("**⚠️ Risques**")
             if risques_target:
-                for _, info in risques_target.items():
-                    st.caption(f"• {info.get('label', '')}")
+                _nat = risques_target.get("naturels", [])
+                _tec = risques_target.get("technologiques", [])
+                if not _nat and not _tec:
+                    st.caption("Aucun risque identifié à cette adresse.")
+                else:
+                    for _r in _nat:
+                        st.caption(f"🌊 {_r['libelle']} — {_r['statut']}")
+                    for _r in _tec:
+                        st.caption(f"🏭 {_r['libelle']} — {_r['statut']}")
+                    if risques_target.get("url"):
+                        st.caption(f"[Rapport complet Géorisques]({risques_target['url']})")
             else:
                 st.caption("Aucun indicateur de risque retourné (ou API indisponible).")
 
