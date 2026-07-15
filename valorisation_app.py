@@ -1509,7 +1509,7 @@ if (_has_offres or _has_dvf) and not st.session_state.portal_dismissed:
 
 # ── Bandeau dossier actif (en haut, au-dessus de tout le reste) ────────────
 _meta = st.session_state.get("active_dossier_meta", {})
-_bcol1, _bcol2, _bcol3, _bcol4 = st.columns([4, 1, 1, 1])
+_bcol1, _bcol2, _bcol3, _bcol4 = st.columns([5, 1.2, 1.2, 1.2])
 with _bcol1:
     st.markdown(
         f"<div style='background:#FAFBFC;border:1px solid #E6E8EC;"
@@ -1522,7 +1522,7 @@ with _bcol1:
         unsafe_allow_html=True,
     )
 with _bcol2:
-    if st.button("💾 Save", use_container_width=True):
+    if st.button("Save", use_container_width=True):
         ok = dossiers.save_dossier_data(
             st.session_state.active_dossier_id,
             dossiers.snapshot_session_state(st.session_state),
@@ -1548,7 +1548,7 @@ with _bcol3:
             _safe_name_xlsx = "".join(c if c.isalnum() else "_" for c in
                                       (_meta.get("nom_client") or "dossier"))[:40]
             st.download_button(
-                "📊 Excel", _xlsx_dossier,
+                "Excel", _xlsx_dossier,
                 file_name=f"comparables_{_safe_name_xlsx}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -1556,10 +1556,10 @@ with _bcol3:
         except Exception as _e:
             st.caption(f"⚠️ Export Excel indisponible : {_e}")
     else:
-        st.button("📊 Excel", disabled=True, use_container_width=True,
+        st.button("Excel", disabled=True, use_container_width=True,
                    help="Lance d'abord une recherche pour avoir des comparables à exporter.")
 with _bcol4:
-    if st.button("📂 Change", use_container_width=True):
+    if st.button("Change", use_container_width=True):
         st.session_state.active_dossier_id = None
         st.session_state.dossier_loaded = False
         st.session_state.portal_dismissed = False  # réafficher le portail au prochain dossier
@@ -3095,33 +3095,14 @@ with tab_dvf:
 
             # ── Sélection des comparables les plus pertinents ──────────────
             st.subheader("🎯 Comparables les plus pertinents")
-            st.caption("Chaque transaction est notée sur sa comparabilité à l'actif "
-                       "(distance, écart de surface, ancienneté). Ajuste les poids "
-                       "selon ce qui compte le plus pour cette valorisation.")
 
-            # Filtres amont : surface plancher + retrait des prix aberrants
-            _fc1, _fc2 = st.columns([1, 2])
-            with _fc1:
-                _surf_min = st.number_input(
-                    "Surface minimum (m²)", min_value=0, max_value=40000,
-                    value=0, step=10, key="dvf_surf_min",
-                    help="Exclut les petits lots (caves, parkings…) qui faussent "
-                         "les prix au m². 0 = pas de filtre.",
-                )
-            with _fc2:
-                _drop_outliers = st.checkbox(
-                    "Exclure les prix/m² aberrants (méthode interquartile)",
-                    value=True, key="dvf_drop_outliers",
-                    help="Retire les valeurs hors de [Q1 − 1,5×IQR ; Q3 + 1,5×IQR]. "
-                         "S'adapte au marché local, contrairement à un seuil fixe.",
-                )
-
+            # IQR intégré d'office : une valeur hors de [Q1-1.5×IQR ; Q3+1.5×IQR]
+            # n'est pas un comparable exploitable (vente entre parties liées, lot
+            # mal renseigné…). Pas d'option : ce serait un piège méthodologique.
             _n_avant = len(dvf_df)
-            if _surf_min > 0 and "Surface (m²)" in dvf_df.columns:
-                dvf_df = dvf_df[dvf_df["Surface (m²)"].fillna(0) >= _surf_min]
-
             _n_outliers = 0
-            if _drop_outliers and "Prix/m²" in dvf_df.columns and len(dvf_df) >= 8:
+            _bornes = None
+            if "Prix/m²" in dvf_df.columns and len(dvf_df) >= 8:
                 _v = dvf_df["Prix/m²"].dropna()
                 if len(_v) >= 8:
                     _q1, _q3 = _v.quantile(0.25), _v.quantile(0.75)
@@ -3130,29 +3111,42 @@ with tab_dvf:
                     _mask_ok = dvf_df["Prix/m²"].isna() | dvf_df["Prix/m²"].between(_lo, _hi)
                     _n_outliers = int((~_mask_ok).sum())
                     dvf_df = dvf_df[_mask_ok]
-                    if _n_outliers:
-                        st.caption(f"🧹 {_n_outliers} valeur(s) aberrante(s) exclue(s) "
-                                   f"— hors de [{_lo:,.0f} ; {_hi:,.0f}] €/m²".replace(",", "\u202f"))
+                    _bornes = (_lo, _hi)
+
+            # Réglages sur une seule ligne alignée
+            _f1, _f2, _f3, _f4, _f5 = st.columns([1.2, 1, 1, 1, 1])
+            with _f1:
+                _surf_min = st.number_input("Surface min. (m²)", min_value=0,
+                                            max_value=40000, value=0, step=10,
+                                            key="dvf_surf_min")
+            with _f2:
+                _w_dist = st.slider("Poids distance", 0.0, 3.0, 1.0, 0.5, key="w_dist")
+            with _f3:
+                _w_surf = st.slider("Poids surface", 0.0, 3.0, 1.0, 0.5, key="w_surf")
+            with _f4:
+                _w_date = st.slider("Poids récence", 0.0, 3.0, 1.0, 0.5, key="w_date")
+            with _f5:
+                _all_tx = st.checkbox("ALL", value=False, key="dvf_all")
+                _n_max = st.slider("Nb max", 1, 100, 20, 1, key="n_max_comp",
+                                   disabled=_all_tx)
+
+            if _surf_min > 0 and "Surface (m²)" in dvf_df.columns:
+                dvf_df = dvf_df[dvf_df["Surface (m²)"].fillna(0) >= _surf_min]
+
+            # Une seule ligne de synthèse des filtres appliqués
+            _msg = []
+            if _n_outliers and _bornes:
+                _msg.append(f"{_n_outliers} valeur(s) aberrante(s) écartée(s) "
+                            f"(hors [{_bornes[0]:,.0f} ; {_bornes[1]:,.0f}] €/m²)".replace(",", "\u202f"))
             if len(dvf_df) < _n_avant:
-                st.caption(f"Filtres : {_n_avant} → **{len(dvf_df)}** transaction(s).")
+                _msg.append(f"{_n_avant} → {len(dvf_df)} transaction(s)")
+            if _msg:
+                st.caption("🧹 " + " · ".join(_msg))
+
             if dvf_df.empty:
                 st.warning("Aucune transaction ne passe les filtres — abaisse la "
-                           "surface minimum ou décoche l'exclusion des aberrants.")
+                           "surface minimum.")
                 st.stop()
-
-            _wc1, _wc2, _wc3, _wc4 = st.columns(4)
-            with _wc1:
-                _w_dist = st.slider("Poids distance", 0.0, 3.0, 1.0, 0.5, key="w_dist")
-            with _wc2:
-                _w_surf = st.slider("Poids surface", 0.0, 3.0, 1.0, 0.5, key="w_surf")
-            with _wc3:
-                _w_date = st.slider("Poids récence", 0.0, 3.0, 1.0, 0.5, key="w_date")
-            with _wc4:
-                _all_tx = st.checkbox("ALL", value=False, key="dvf_all",
-                                      help="Afficher toutes les transactions "
-                                           "(désactive la limite).")
-                _n_max = st.slider("Nb transactions max", 1, 100, 20, 1,
-                                   key="n_max_comp", disabled=_all_tx)
 
             if not surface_target:
                 st.caption("💡 Renseigne la **surface de l'actif** (section 1) pour "
@@ -3207,17 +3201,10 @@ with tab_dvf:
 
             # Carte DVF
             st.subheader("Carte des transactions")
-            _show_parcelles = st.checkbox(
-                "🗺️ Afficher le contour cadastral des parcelles",
-                value=False,
-                help="Trace le plan de la parcelle autour de chaque transaction "
-                     "affichée. Une requête IGN par transaction : à réserver aux "
-                     "sélections restreintes (≤ 30).",
-                disabled=len(dvf_df) > 30,
-            )
-            if len(dvf_df) > 30:
-                st.caption("💡 Réduis « Nb transactions max » à 30 ou moins pour "
-                           "pouvoir afficher les contours cadastraux.")
+            # Contours cadastraux tracés automatiquement quand la sélection est
+            # restreinte (≤30) : une requête IGN par transaction, donc impossible
+            # sur de gros volumes. Au-delà, seuls les points sont affichés.
+            _show_parcelles = len(dvf_df) <= 30
             dvf_map = folium.Map(location=[t_lat, t_lon], zoom_start=14, tiles=None)
             folium.TileLayer(
                 "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
