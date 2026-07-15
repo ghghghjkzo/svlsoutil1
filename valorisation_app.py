@@ -741,21 +741,41 @@ code { background: var(--panel-2) !important; color: var(--gold-dim) !important;
 [data-testid="stMetricDelta"] * { font-size:12px !important; }
 
 /* ── Boutons ──────────────────────────────────────────────── */
+/* Boutons : neutres au repos, l'or ne surgit qu'au survol — l'accent doit
+   signaler l'intention, pas saturer l'écran en permanence. */
 .stButton > button {
-  background: var(--gold) !important; color:#14161F !important;
-  font-weight:700 !important; border:none !important; border-radius: var(--r-sm) !important;
+  background: var(--panel-2) !important; color: var(--tx-hi) !important;
+  font-weight:600 !important; border:1px solid var(--line-2) !important;
+  border-radius: var(--r-sm) !important;
   font-size:13.5px !important; padding:9px 20px !important; letter-spacing:0.01em;
-  box-shadow: var(--sh-1);
-  transition: transform .22s var(--ease), box-shadow .22s var(--ease), background .2s var(--ease) !important;
+  box-shadow: none;
+  transition: transform .22s var(--ease), box-shadow .22s var(--ease),
+              background .2s var(--ease), border-color .2s var(--ease),
+              color .2s var(--ease) !important;
 }
 .stButton > button:hover {
-  background: var(--gold-dim) !important; transform: translateY(-1px);
+  background: var(--gold) !important; color:#14161F !important;
+  border-color: var(--gold) !important; font-weight:700 !important;
+  transform: translateY(-1px);
   box-shadow: 0 8px 20px -6px rgba(255,223,0,0.4);
 }
 .stButton > button:active { transform: translateY(0) scale(.98); }
 .stButton > button:disabled {
   background: var(--panel-3) !important; color: var(--tx-faint) !important;
-  box-shadow:none; cursor:not-allowed;
+  border-color: var(--line-1) !important;
+  box-shadow:none; cursor:not-allowed; opacity:.55;
+}
+.stButton > button:disabled:hover {
+  background: var(--panel-3) !important; color: var(--tx-faint) !important;
+  border-color: var(--line-1) !important; transform:none;
+}
+/* Action principale (type="primary") : seule à porter l'or au repos */
+.stButton > button[kind="primary"] {
+  background: var(--gold) !important; color:#14161F !important;
+  border-color: var(--gold) !important; font-weight:700 !important;
+}
+.stButton > button[kind="primary"]:hover {
+  background: var(--gold-dim) !important;
 }
 /* boutons secondaires (kind="secondary") */
 .stButton > button[kind="secondary"] {
@@ -765,14 +785,18 @@ code { background: var(--panel-2) !important; color: var(--gold-dim) !important;
 .stButton > button[kind="secondary"]:hover {
   border-color: var(--gold) !important; color: var(--gold) !important; background: var(--gold-glow) !important;
 }
+/* Boutons de téléchargement : même logique — neutres au repos */
 .stDownloadButton > button {
-  background: transparent !important; color: var(--gold) !important;
-  border: 1px solid var(--gold) !important; font-weight:700 !important;
+  background: var(--panel-2) !important; color: var(--tx-hi) !important;
+  border: 1px solid var(--line-2) !important; font-weight:600 !important;
   border-radius: var(--r-sm) !important; font-size:13.5px !important;
+  padding:9px 20px !important;
   transition: all .22s var(--ease) !important;
 }
 .stDownloadButton > button:hover {
-  background: var(--gold) !important; color:#14161F !important; transform: translateY(-1px);
+  background: var(--gold) !important; color:#14161F !important;
+  border-color: var(--gold) !important; font-weight:700 !important;
+  transform: translateY(-1px);
   box-shadow: 0 8px 20px -6px rgba(255,223,0,0.4);
 }
 
@@ -1363,58 +1387,110 @@ if "active_dossier_id" not in st.session_state:
     st.session_state.active_dossier_id = None
 
 if st.session_state.active_dossier_id is None:
-    st.markdown(
-        "<div style='max-width:640px;margin:20px auto'>"
-        "<h2 style='color:#25273A'>📁 Mes dossiers</h2></div>",
-        unsafe_allow_html=True,
-    )
-
     existing = dossiers.list_dossiers(user["id"]) if user else []
 
-    col_new, col_list = st.columns([1, 2])
-    with col_new:
-        st.markdown("#### ➕ Nouveau dossier")
-        with st.form("new_dossier_form"):
-            nc = st.text_input("Nom du client / dossier", placeholder="ex. Actif Rue de la Tour")
-            adr = st.text_input("Adresse (optionnel, éditable ensuite)", placeholder="ex. Nantes")
-            tb = st.selectbox("Type de bien", ["Bureaux", "Activités", "Commerce", "Mixte"])
-            create = st.form_submit_button("Créer le dossier", use_container_width=True)
-        if create:
-            new_d = dossiers.create_dossier(user["id"], nc, adr, tb)
-            if new_d:
-                st.session_state.active_dossier_id = new_d["id"]
-                st.session_state.active_dossier_meta = new_d
-                st.session_state.pop("mode_radio_key", None)
-                st.session_state.live_results = []  # nouveau dossier = pas d'ancien résultat
-                st.rerun()
-            else:
-                st.error("Échec de création — vérifie la connexion à la base de données.")
+    if "creating_dossier" not in st.session_state:
+        st.session_state.creating_dossier = False
 
-    with col_list:
-        st.markdown("#### 📂 Dossiers existants")
+    # Animation d'entrée : les cartes apparaissent en cascade au chargement.
+    st.markdown("""
+    <style>
+    @keyframes valoFadeUp {
+      from { opacity:0; transform: translateY(14px); }
+      to   { opacity:1; transform: translateY(0); }
+    }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"] {
+      animation: valoFadeUp .45s cubic-bezier(.22,1,.36,1) both;
+    }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(1) { animation-delay:.02s; }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(2) { animation-delay:.07s; }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(3) { animation-delay:.12s; }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(4) { animation-delay:.17s; }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(5) { animation-delay:.22s; }
+    .valo-fade > div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(n+6){ animation-delay:.27s; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ══ PORTAIL DE CRÉATION ═══════════════════════════════════════════════
+    if st.session_state.creating_dossier:
+        st.markdown(
+            "<div style='max-width:560px;margin:6vh auto 0'>"
+            "<div style='color:#8A93A3;font-weight:600;text-transform:uppercase;"
+            "font-size:11px;letter-spacing:.05em'>Créer</div>"
+            "<h2 style='margin:4px 0 18px'>Nouveau dossier</h2></div>",
+            unsafe_allow_html=True,
+        )
+        _l, _mid, _r = st.columns([1, 2, 1])
+        with _mid:
+            if st.button("← Retour", key="back_from_create"):
+                st.session_state.creating_dossier = False
+                st.rerun()
+            with st.form("new_dossier_form"):
+                nc = st.text_input("Nom du client / dossier",
+                                   placeholder="ex. Actif Rue de la Tour")
+                adr = st.text_input("Adresse", placeholder="ex. 12 rue de la Paix, Nantes")
+                tb = st.selectbox("Type de bien", ["Bureaux", "Activités", "Commerce", "Mixte"])
+                create = st.form_submit_button("Créer le dossier",
+                                               use_container_width=True, type="primary")
+            if create:
+                if not (nc or "").strip():
+                    st.error("Donne un nom au dossier.")
+                else:
+                    new_d = dossiers.create_dossier(user["id"], nc, adr, tb)
+                    if new_d:
+                        st.session_state.active_dossier_id = new_d["id"]
+                        st.session_state.active_dossier_meta = new_d
+                        st.session_state.creating_dossier = False
+                        st.session_state.pop("mode_radio_key", None)
+                        st.session_state.live_results = []
+                        st.rerun()
+                    else:
+                        st.error("Échec de création — vérifie la connexion à la base.")
+        st.stop()
+
+    # ══ LISTE DES DOSSIERS ════════════════════════════════════════════════
+    _hl, _hc, _hr = st.columns([1, 3, 1])
+    with _hc:
+        st.markdown(
+            "<div style='margin:4vh 0 6px'>"
+            "<div style='color:#8A93A3;font-weight:600;text-transform:uppercase;"
+            "font-size:11px;letter-spacing:.05em'>Espace de travail</div>"
+            "<h2 style='margin:2px 0 0'>Mes dossiers</h2></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("＋  Nouveau dossier", use_container_width=True,
+                     type="primary", key="btn_new_dossier"):
+            st.session_state.creating_dossier = True
+            st.rerun()
+        st.write("")
+
         if not existing:
-            st.caption("Aucun dossier pour l'instant. Crée ton premier dossier à gauche.")
+            st.caption("Aucun dossier pour l'instant — crée le premier ci-dessus.")
         else:
+            # Du plus récent au plus ancien (list_dossiers trie déjà par updated_at)
+            st.markdown('<div class="valo-fade">', unsafe_allow_html=True)
             for d in existing:
                 with st.container(border=True):
-                    c1, c2, c3 = st.columns([3, 1, 1])
-                    with c1:
+                    _c1, _c2, _c3 = st.columns([4, 1, 0.6])
+                    with _c1:
                         st.markdown(f"**{d.get('nom_client', 'Sans nom')}**")
-                        st.caption(f"{d.get('adresse','—') or '—'} · {d.get('type_bien','—')} · "
-                                   f"{d.get('statut','brouillon')}")
+                        _bits = [d.get("adresse") or "—", d.get("type_bien", "—"),
+                                 d.get("statut", "brouillon")]
+                        st.caption(" · ".join(str(b) for b in _bits if b))
                         upd = d.get("updated_at", "")
                         if upd:
                             st.caption(f"Modifié le {upd[:10]} à {upd[11:16]}")
-                    with c2:
+                    with _c2:
                         if st.button("Ouvrir", key=f"open_{d['id']}", use_container_width=True):
                             st.session_state.active_dossier_id = d["id"]
                             st.session_state.active_dossier_meta = d
                             st.session_state.pop("mode_radio_key", None)
                             st.rerun()
-                    with c3:
+                    with _c3:
                         if st.button("🗑️", key=f"del_{d['id']}", use_container_width=True):
                             dossiers.delete_dossier(d["id"])
                             st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 # ── Dossier actif : chargement du contenu sauvegardé (une seule fois) ──────
@@ -1452,11 +1528,23 @@ if (_has_offres or _has_dvf) and not st.session_state.portal_dismissed:
         f"<h1 style='color:#14161F;margin:6px 0 2px'>{_pmeta.get('nom_client','Sans nom')}</h1>"
         f"<div style='color:#5A6372;font-size:15px'>{_pmeta.get('adresse','—') or '—'}</div>"
         f"<div style='margin-top:8px;color:#008493;font-size:13px'>"
-        f"{'📊 ' + str(len(st.session_state['live_results'])) + ' offre(s) · ' if _has_offres else ''}"
-        f"{'🏛️ ' + str(len(_dvf_saved)) + ' transaction(s) DVF' if _has_dvf else ''}</div>"
+        f"{plur(len(st.session_state['live_results']), 'offre') + ' · ' if _has_offres else ''}"
+        f"{plur(len(_dvf_saved), 'transaction') + ' DVF' if _has_dvf else ''}</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
+    st.write("")
+    # Retour à la liste : on peut s'être trompé de dossier
+    _bk1, _bk2, _bk3 = st.columns([1, 2, 1])
+    with _bk2:
+        if st.button("← Retour aux dossiers", key="portal_back",
+                     use_container_width=True):
+            st.session_state.active_dossier_id = None
+            st.session_state.dossier_loaded = False
+            st.session_state.portal_dismissed = False
+            st.session_state.pop("portal_xlsx", None)
+            st.session_state.pop("mode_radio_key", None)
+            st.rerun()
     st.write("")
     _pc1, _pc2, _pc3 = st.columns(3)
 
@@ -1653,7 +1741,7 @@ with st.sidebar:
         )
     mode = st.radio("Mode", _mode_options, key="mode_radio_key")
     if _has_saved_results and mode == _mode_options[1]:
-        st.caption(f"✅ {len(st.session_state.live_results)} comparable(s) déjà chargé(s) "
+        st.caption(f"✅ {plur(len(st.session_state.live_results), 'comparable déjà chargé', 'comparables déjà chargés')} "
                     f"depuis ce dossier — export possible immédiatement ci-dessous, "
                     f"ou relance une recherche pour les mettre à jour.")
 
@@ -1796,8 +1884,8 @@ if mode == "Charger un fichier Excel":
     has_price = df["Loyer_facial_eur_m2_an"].apply(to_num).notna() | df["Prix_vente_eur_m2"].apply(to_num).notna()
     df = df[has_price].reset_index(drop=True)
     if len(df) < n_before:
-        st.caption(f"ℹ️ {n_before - len(df)} ligne(s) écartée(s) (commune, surface ou prix manquant).")
-    st.write(f"**{len(df)}** référence(s) exploitable(s) chargée(s) depuis le fichier.")
+        st.caption(f"ℹ️ {plur(n_before - len(df), 'ligne écartée', 'lignes écartées')} (commune, surface ou prix manquant).")
+    st.write(f"**{plur(len(df), 'référence exploitable', 'références exploitables')}** chargée{'s' if len(df) > 1 else ''} depuis le fichier.")
 else:
     if "live_results" not in st.session_state:
         st.session_state.live_results = []
@@ -1813,7 +1901,8 @@ else:
         types_to_search = ["Bureaux", "Activités", "Commerce"] if asset_type == "Tous" else [asset_type]
         n_sources = len(selected_sources) if selected_sources else len(live_search.ALL_SOURCES)
         est_sec = n_sources * max_pages * 0.5
-        with st.spinner(f"Recherche en direct — {max_pages} page(s) × {n_sources} source(s) "
+        with st.spinner(f"Recherche en direct — {plur(max_pages, 'page')} × "
+                        f"{plur(n_sources, 'source')} "
                          f"(~{est_sec:.0f}s)…"):
             collected = []
             for o in ops_to_search:
@@ -1890,9 +1979,9 @@ else:
             st.stop()
         else:
             n_raw = len(merged)
-            msg = f"✅ {len(filtered)} annonce(s) retenue(s) sur {search_commune}"
+            msg = f"✅ {plur(len(filtered), 'annonce retenue', 'annonces retenues')} sur {search_commune}"
             if only_complete and n_raw > len(filtered):
-                msg += f" ({n_raw - len(filtered)} écartée(s) — adresse ou prix manquant)"
+                msg += f" ({n_raw - len(filtered)} écartée{'s' if (n_raw - len(filtered)) > 1 else ''} — adresse ou prix manquant)"
             st.success(msg)
     if not st.session_state.live_results:
         st.info("Lance la recherche en direct dans la barre latérale.")
@@ -1912,7 +2001,7 @@ else:
         )
         prog_p.empty()
         n_found = sum(1 for r in st.session_state.live_results if r.get("Photo_url"))
-        st.caption(f"📷 {n_found}/{len(st.session_state.live_results)} photo(s) récupérée(s).")
+        st.caption(f"📷 {n_found}/{len(st.session_state.live_results)} photo{'s' if n_found > 1 else ''} récupérée{'s' if n_found > 1 else ''}.")
 
     # ── Enrichissement géo : PLU + Cadastre pour chaque comparable ───────
     n_sans_plu = sum(1 for r in st.session_state.live_results if not r.get("PLU_zone"))
@@ -1929,7 +2018,7 @@ else:
         prog_g.empty()
         n_plu = sum(1 for r in st.session_state.live_results if r.get("PLU_zone"))
         if n_plu > 0:
-            st.caption(f"🏙️ {n_plu}/{len(st.session_state.live_results)} comparable(s) avec zone PLU.")
+            st.caption(f"🏙️ {n_plu}/{len(st.session_state.live_results)} comparable{'s' if n_plu > 1 else ''} avec zone PLU.")
 
         # ── Autosave automatique : le dossier se sauvegarde sans clic requis ──
         if st.session_state.get("active_dossier_id"):
@@ -1942,7 +2031,7 @@ else:
                 st.caption("💾 Dossier sauvegardé automatiquement.")
 
     df = pd.DataFrame(st.session_state.live_results)
-    st.write(f"**{len(df)}** référence(s) retenue(s) (en direct, à valider).")
+    st.write(f"**{plur(len(df), 'référence retenue', 'références retenues')}** (en direct, à valider).")
 
     # La vue simplifiée (avec Latitude/Longitude) est affichée PLUS BAS, après le
     # géocodage — sinon les colonnes _lat/_lon n'existent pas encore et s'affichent
@@ -2128,10 +2217,10 @@ else:
 unit = "€/m²" if is_vente_field else "€/m²/an HT-HC"
 
 if n_implausible:
-    st.caption(f"⚠️ {n_implausible} valeur(s) hors fourchette écartée(s).")
+    st.caption(f"⚠️ {plur(n_implausible, 'valeur')} hors fourchette écartée{'s' if n_implausible > 1 else ''}.")
 if not res.empty and "n_outliers" in dir():
     if n_outliers > 0:
-        st.caption(f"📊 {n_outliers} outlier(s) retiré(s) par filtrage IQR (valeurs aberrantes).")
+        st.caption(f"📊 {plur(n_outliers, 'outlier retiré', 'outliers retirés')} par filtrage IQR (valeurs aberrantes).")
 
 COLS_KEEP = {
     "Adresse":                "Adresse",
@@ -2214,8 +2303,29 @@ def valo_bloc(df_subset: pd.DataFrame, label: str, color: str, key_suffix: str):
     if n < 4:
         st.warning("Peu de comparables — élargis le rayon ou ajoute des références.")
 
+    # ── Aperçu synthétique (avant le détail) ─────────────────────────────
+    # L'essentiel d'abord : adresse, surface, prix. Le tableau complet
+    # (état, prestations, photos, commentaires…) vient ensuite.
+    _ap_prix_col = ("Prix vente €/m²" if is_vente_field else "Loyer HT-HC €/m²/an")
+    _apercu = pd.DataFrame({
+        "Adresse": display.get("Adresse", ""),
+        "Ville": display.get("Commune", ""),
+        "Surface (m²)": display.get("Surface (m²)"),
+        f"{'Prix' if is_vente_field else 'Loyer'} (€/m²)": display["_val"],
+    })
+    st.caption("**Aperçu** — l'essentiel des comparables retenus :")
+    st.dataframe(
+        _apercu, use_container_width=True, hide_index=True,
+        column_config={
+            "Surface (m²)": st.column_config.NumberColumn(format="%d m²"),
+            f"{'Prix' if is_vente_field else 'Loyer'} (€/m²)":
+                st.column_config.NumberColumn(format="%.0f €"),
+        },
+    )
+
     # tableau éditable
-    st.caption("Modifiable directement — les corrections sont répercutées dans l'export.")
+    st.caption("**Détail complet** — modifiable directement, les corrections "
+               "sont répercutées dans l'export.")
     edited = st.data_editor(
         display, use_container_width=True, hide_index=True,
         num_rows="fixed", column_config=COL_CONFIG, key=f"editor_{key_suffix}"
@@ -2292,6 +2402,18 @@ def _valid_coord(v) -> bool:
         return v is not None and math.isfinite(float(v))
     except (TypeError, ValueError):
         return False
+
+
+def plur(n, singulier: str, pluriel: str | None = None) -> str:
+    """Accorde un mot selon le nombre : plur(1,'transaction') → '1 transaction',
+    plur(3,'transaction') → '3 transactions'. Évite les « (s) » inélégants.
+    Pour un pluriel irrégulier, passer la forme explicitement."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 0
+    mot = singulier if abs(n) <= 1 else (pluriel or singulier + "s")
+    return f"{n:,}".replace(",", "\u202f") + f" {mot}"
 
 
 def _safe_int(v, default=None):
@@ -2531,7 +2653,7 @@ with tab_analyse:
 
     st.subheader("🟠 Seconde main")
     if _n_excl_sm:
-        st.caption(f"ℹ️ {_n_excl_sm} comparable(s) Seconde main écarté(s) — aucun loyer/m² "
+        st.caption(f"ℹ️ {plur(_n_excl_sm, 'comparable Seconde main écarté', 'comparables Seconde main écartés')} — aucun loyer/m² "
                     f"ni prix de vente/m² renseigné.")
     if res_sm.empty:
         st.info("Aucun comparable Seconde main exploitable dans le rayon avec ces critères.")
@@ -2959,7 +3081,7 @@ with tab_dvf:
                             f"Essaie d'élargir le rayon."
                         )
                     else:
-                        st.success(f"✅ {len(dvf_df)} mutation(s) trouvée(s) via SOGEFI DVF+.")
+                        st.success(f"✅ {plur(len(dvf_df), 'mutation trouvée', 'mutations trouvées')} via SOGEFI DVF+.")
             else:
                 with st.spinner(f"Téléchargement DVF pour {search_commune_dvf}…"):
                     try:
@@ -2979,11 +3101,11 @@ with tab_dvf:
                                 f"changer la commune dans la barre latérale."
                             )
                         else:
-                            st.success(f"✅ {len(dvf_df)} transaction(s) trouvée(s).")
+                            st.success(f"✅ {plur(len(dvf_df), 'transaction trouvée', 'transactions trouvées')}.")
                             _failed = getattr(apis, "DVF_LAST_FAILED_YEARS", [])
                             if _failed:
                                 st.warning(
-                                    f"⚠️ data.gouv n'a pas répondu pour {len(_failed)} année(s) "
+                                    f"⚠️ data.gouv n'a pas répondu pour {plur(len(_failed), 'année')} "
                                     f"({', '.join(_failed)}) — résultats **partiels**. "
                                     f"C'est une indisponibilité temporaire de data.gouv, pas un "
                                     f"bug : relance la recherche dans quelques minutes pour "
@@ -3007,7 +3129,7 @@ with tab_dvf:
                     if commune_df.empty:
                         st.warning(f"Aucune transaction trouvée pour {search_commune_dvf}.")
                     else:
-                        st.success(f"✅ {len(commune_df)} transaction(s) trouvée(s) sur "
+                        st.success(f"✅ {plur(len(commune_df), 'transaction trouvée', 'transactions trouvées')} sur "
                                     f"l'ensemble de {search_commune_dvf}.")
                 except Exception as e:
                     st.error(f"Erreur DVF (commune complète) : {e}")
@@ -3098,9 +3220,9 @@ with tab_dvf:
                     dvf_df = dvf_df[_mask_ok]
                     _bornes = (_lo, _hi)
             if _n_outliers and _bornes:
-                st.caption(f"🧹 {_n_outliers} valeur(s) aberrante(s) écartée(s) "
+                st.caption(f"🧹 {plur(_n_outliers, 'valeur aberrante écartée', 'valeurs aberrantes écartées')} "
                            f"(hors [{_bornes[0]:,.0f} ; {_bornes[1]:,.0f}] €/m²) · "
-                           f"{_n_brut} → {len(dvf_df)} transaction(s) exploitables"
+                           f"{_n_brut} → {plur(len(dvf_df), 'transaction exploitable', 'transactions exploitables')}"
                            .replace(",", "\u202f"))
 
             # Métriques de synthèse — calculées ici (pas via apis.dvf_summary)
@@ -3149,7 +3271,7 @@ with tab_dvf:
                 dvf_df = dvf_df[dvf_df["Surface (m²)"].fillna(0) >= _surf_min]
                 if len(dvf_df) < _n_avant_surf:
                     st.caption(f"📐 Surface ≥ {_surf_min} m² : "
-                               f"{_n_avant_surf} → {len(dvf_df)} transaction(s).")
+                               f"{_n_avant_surf} → {plur(len(dvf_df), 'transaction')}.")
 
             # PAS de st.stop() ici : il interromprait TOUT le script, donc la
             # carte DVF plus bas et les onglets suivants (Targomo, Urbanisme)
@@ -3169,10 +3291,10 @@ with tab_dvf:
                 radius_max_m=dvf_radius_km * 1000,
             )
             _dvf_top = _dvf_scored if _all_tx else _dvf_scored.head(_n_max)
-            st.info(f"**{len(_dvf_top)}** transaction(s) retenue(s) sur {len(dvf_df)} "
+            st.info(f"**{plur(len(_dvf_top), 'transaction retenue', 'transactions retenues')}** sur {len(dvf_df)} "
                     f"— score moyen {_dvf_top['Score'].mean():.0f}/100"
                     if not _dvf_top.empty and _dvf_top["Score"].notna().any()
-                    else f"**{len(_dvf_top)}** transaction(s) retenue(s).")
+                    else f"**{plur(len(_dvf_top), 'transaction retenue', 'transactions retenues')}**.")
 
             # Stats recalculées sur la sélection (plus pertinent que sur tout)
             _vsel = _dvf_top["Prix/m²"].dropna() if "Prix/m²" in _dvf_top.columns else pd.Series(dtype=float)
@@ -3264,40 +3386,53 @@ with tab_dvf:
                     tooltip=f"DVF — {_px_txt or 'prix inconnu'}",
                 ).add_to(_marker_target)
 
-            # ── Contours cadastraux des parcelles (option) ────────────────
+            # ── Contours cadastraux des parcelles ────────────────────────
             # Une requête IGN par transaction → réservé aux petites sélections.
+            # TOUT le bloc est protégé : une erreur ici (API, format, géométrie)
+            # ne doit JAMAIS empêcher le rendu de la carte qui suit.
             if _show_parcelles and len(dvf_df) <= 30:
                 _n_parc = 0
-                with st.spinner("Récupération des parcelles cadastrales…"):
-                    for _, row in dvf_df.iterrows():
-                        if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
-                            continue
-                        _pj = apis.fetch_parcelle_geometry(float(row["_lat"]), float(row["_lon"]))
-                        if not _pj:
-                            continue
-                        try:
-                            _pdata = json.loads(_pj)
-                        except Exception:
-                            continue
-                        _sect = _pdata.get("section", "")
-                        _num = _pdata.get("numero", "")
-                        _cont = _pdata.get("contenance")
-                        _tip = f"Parcelle {_sect} {_num}"
-                        if _cont:
-                            _tip += f" — {_cont:,} m²".replace(",", "\u202f")
-                        folium.GeoJson(
-                            _pdata["geometry"],
-                            style_function=lambda _f: {
-                                "fillColor": "#008493", "color": "#25273A",
-                                "weight": 2, "fillOpacity": 0.12,
-                            },
-                            tooltip=_tip,
-                        ).add_to(dvf_map)
-                        _n_parc += 1
+                try:
+                    with st.spinner("Récupération des parcelles cadastrales…"):
+                        for _, row in dvf_df.iterrows():
+                            if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
+                                continue
+                            try:
+                                _pj = apis.fetch_parcelle_geometry(float(row["_lat"]), float(row["_lon"]))
+                                if not _pj:
+                                    continue
+                                _pdata = json.loads(_pj)
+                                _sect = _pdata.get("section", "")
+                                _num = _pdata.get("numero", "")
+                                _cont = _safe_int(_pdata.get("contenance"))
+                                _tip = f"Parcelle {_sect} {_num}"
+                                if _cont is not None:
+                                    _tip += f" — {_cont:,} m²".replace(",", "\u202f")
+                                folium.GeoJson(
+                                    _pdata["geometry"],
+                                    style_function=lambda _f: {
+                                        "fillColor": "#008493", "color": "#25273A",
+                                        "weight": 2, "fillOpacity": 0.12,
+                                    },
+                                    tooltip=_tip,
+                                ).add_to(dvf_map)
+                                _n_parc += 1
+                            except Exception:
+                                continue  # parcelle illisible → on passe à la suivante
+                except Exception:
+                    pass  # échec global → la carte s'affiche quand même
                 if _n_parc:
-                    st.caption(f"🗺️ {_n_parc} parcelle(s) cadastrale(s) tracée(s).")
+                    st.caption(f"🗺️ {plur(_n_parc, 'parcelle cadastrale tracée', 'parcelles cadastrales tracées')}.")
 
-            components.html(dvf_map._repr_html_(), height=480, scrolling=False)
+            try:
+                components.html(dvf_map._repr_html_(), height=480, scrolling=False)
+            except Exception as _map_err:
+                # Rendre l'échec visible plutôt que d'afficher une zone vide :
+                # un écran blanc sans message est indébogable côté utilisateur.
+                st.error(f"❌ La carte n'a pas pu être rendue : {type(_map_err).__name__}")
+                st.caption("Les données sont bien chargées — seul l'affichage "
+                           "cartographique a échoué. Réduis le nombre de "
+                           "transactions ou signale l'erreur.")
 
             # Export
             st.download_button(
@@ -3315,7 +3450,7 @@ with tab_dvf:
             st.divider()
             st.subheader(f"🗺️ Toutes les transactions — {search_commune_dvf}")
             st.caption(
-                f"{len(dvf_commune_df)} transaction(s) affichée(s), regroupées "
+                f"{plur(len(dvf_commune_df), 'transaction affichée', 'transactions affichées')}, regroupées "
                 f"automatiquement selon le niveau de zoom (clustering). "
                 f"Couleur du cercle = tranche de prix/m²."
             )
@@ -3531,7 +3666,12 @@ with tab_urba:
                 if _cont is not None:
                     st.caption(f"Contenance : {_cont:,} m²".replace(",", "\u202f"))
             else:
-                st.caption("Parcelle non identifiée à ces coordonnées.")
+                st.caption("⚠️ Aucune parcelle à ces coordonnées — l'adresse est "
+                           "probablement géocodée au milieu de la voie (le domaine "
+                           "public n'est pas cadastré).")
+                st.caption("👉 Saisis l'**adresse exacte avec le numéro de voie** "
+                           "(ex. « 12 rue de la Paix, Nantes ») pour identifier "
+                           "la parcelle.")
         with c3:
             st.markdown("**⚠️ Risques**")
             if risques_target:

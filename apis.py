@@ -213,6 +213,12 @@ def fetch_cadastre_info(lat: float, lon: float) -> dict | None:
     # APIcarto attend une GÉOMÉTRIE GeoJSON dans le paramètre "geom".
     # Envoyer lat/lon séparément ne filtre RIEN : l'API renvoyait alors une
     # parcelle arbitraire (ex. dept 13 pour une adresse à Paris).
+    #
+    # Recherche EXACTE : le point doit tomber sur la parcelle. Pas de repli sur
+    # un rayon — en valorisation, une parcelle voisine serait une erreur pire
+    # que l'absence de réponse. Si l'adresse est géocodée au milieu de la rue
+    # (domaine public non cadastré), on renvoie None et l'app invite à saisir
+    # une adresse plus précise (avec numéro de voie).
     _geom = json.dumps({"type": "Point", "coordinates": [lon, lat]})
     data = _get(
         "https://apicarto.ign.fr/api/cadastre/parcelle",
