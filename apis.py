@@ -152,9 +152,10 @@ def fetch_plu_zone(lat: float, lon: float) -> dict | None:
             }
 
     # ── Source 2 : IGN APIcarto GPU ─────────────────────────────────────
+    # ATTENTION : le paramètre s'appelle "geom" (pas "geometry") — sinon 400.
     data2 = _get(
         "https://apicarto.ign.fr/api/gpu/zone-urba",
-        params={"geometry": geom, "_limit": 1},
+        params={"geom": geom, "_limit": 1},
         timeout=10,
     )
     if data2:
@@ -209,9 +210,13 @@ def fetch_cadastre_info(lat: float, lon: float) -> dict | None:
         dict avec section, numero, contenance (m²), commune, code_dep, code_com
         ou None si indisponible.
     """
+    # APIcarto attend une GÉOMÉTRIE GeoJSON dans le paramètre "geom".
+    # Envoyer lat/lon séparément ne filtre RIEN : l'API renvoyait alors une
+    # parcelle arbitraire (ex. dept 13 pour une adresse à Paris).
+    _geom = json.dumps({"type": "Point", "coordinates": [lon, lat]})
     data = _get(
         "https://apicarto.ign.fr/api/cadastre/parcelle",
-        params={"lon": lon, "lat": lat, "_limit": 1},
+        params={"geom": _geom, "_limit": 1},
         timeout=10,
     )
     if not data:
@@ -242,63 +247,58 @@ def fetch_cadastre_info(lat: float, lon: float) -> dict | None:
 @lru_cache(maxsize=256)
 def fetch_georisques(lat: float, lon: float) -> dict | None:
     """
-    Récupère les indicateurs de risques pour un point géographique.
+    Récupère les risques naturels et technologiques pour un point.
 
-    Source : Géorisques API v1 (BRGM/DGPR)
-    Endpoint : https://georisques.gouv.fr/api/v1/
+    Source : Géorisques API v1 (BRGM/DGPR), endpoint unifié
+    « resultats_rapport_risque » — UNE requête renvoie tous les risques.
+    Les anciens endpoints séparés (/argiles, /radon…) sont soit supprimés
+    (404) soit incompatibles (400) ; cet endpoint est celui qui alimente le
+    rapport officiel du site georisques.gouv.fr.
 
-    Risques retournés : argile, sismicité, radon, inondation, ICPE, BASIAS
+    Note : certaines couches n'existent pas partout (ex. la carte argiles
+    exclut Paris intra-muros) — l'absence d'un risque n'est pas une erreur.
 
     Returns:
-        dict avec les niveaux de risque ou None si indisponible.
+        dict {"naturels": [...], "technologiques": [...], "commune": str,
+              "url": str} ou None si indisponible.
     """
-    # Risque argile (retrait-gonflement)
-    argile = _get(
-        "https://georisques.gouv.fr/api/v1/argiles",
-        params={"latlon": f"{lon},{lat}", "rayon": 1},
-        timeout=10,
+    data = _get(
+        "https://georisques.gouv.fr/api/v1/resultats_rapport_risque",
+        params={"latlon": f"{lon},{lat}"},
+        timeout=15,
     )
+    if not data:
+        return None
 
-    # Risque sismique
-    seisme = _get(
-        "https://georisques.gouv.fr/api/v1/zonage_sismique",
-        params={"latlon": f"{lon},{lat}", "rayon": 1},
-        timeout=10,
-    )
+    def _extract(bloc: dict) -> list[dict]:
+        """Ne garde que les risques réellement présents, avec leur libellé."""
+        out = []
+        for _key, v in (bloc or {}).items():
+            if not isinstance(v, dict) or not v.get("present"):
+                continue
+            statut = (v.get("libelleStatutAdresse")
+                      or v.get("libelleStatutCommune") or "Risque existant")
+            out.append({
+                "cle":    _key,
+                "libelle": v.get("libelle", _key),
+                "statut":  statut,
+            })
+        return out
 
-    # ICPE (installations classées) à proximité
-    icpe = _get(
-        "https://georisques.gouv.fr/api/v1/installations_classees",
-        params={"latlon": f"{lon},{lat}", "rayon": 500},
-        timeout=10,
-    )
+    naturels = _extract(data.get("risquesNaturels"))
+    techno   = _extract(data.get("risquesTechnologiques"))
+    commune  = (data.get("commune") or {}).get("libelle", "")
 
-    # Risque radon
-    radon = _get(
-        "https://georisques.gouv.fr/api/v1/radon",
-        params={"latlon": f"{lon},{lat}", "rayon": 1},
-        timeout=10,
-    )
+    if not naturels and not techno:
+        return {"naturels": [], "technologiques": [], "commune": commune,
+                "url": data.get("url", ""), "aucun": True}
 
-    result = {}
-
-    if argile and argile.get("data"):
-        niv = argile["data"][0].get("niveauAlea", "")
-        result["argile"] = {"niveau": niv, "label": f"Argile — {niv or 'NC'}"}
-
-    if seisme and seisme.get("data"):
-        zone = seisme["data"][0].get("zoneDesc", "")
-        result["sismicite"] = {"zone": zone, "label": f"Sismicité zone {zone}"}
-
-    if icpe and icpe.get("data"):
-        n = len(icpe["data"])
-        result["icpe"] = {"nb": n, "label": f"{n} ICPE dans 500 m" if n else "Aucune ICPE proche"}
-
-    if radon and radon.get("data"):
-        cat = radon["data"][0].get("categorieRadon", "")
-        result["radon"] = {"categorie": cat, "label": f"Radon catégorie {cat}"}
-
-    return result if result else None
+    return {
+        "naturels":       naturels,
+        "technologiques": techno,
+        "commune":        commune,
+        "url":            data.get("url", ""),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1034,3 +1034,40 @@ def enrich_comparables_batch(items: list[dict], max_items: int = 30,
         time.sleep(0.08)   # courtoisie API
     out.extend(tail)
     return out
+
+
+
+@lru_cache(maxsize=512)
+def fetch_parcelle_geometry(lat: float, lon: float) -> str | None:
+    """Récupère le CONTOUR (polygone GeoJSON) de la parcelle cadastrale
+    contenant le point donné.
+
+    Utilisé pour encadrer chaque transaction DVF par le plan de sa parcelle.
+    Retourne la géométrie sérialisée en JSON (str) pour rester hashable et
+    compatible avec le cache ; None si aucune parcelle / API indisponible.
+
+    Note : on interroge par géométrie (paramètre "geom"), pas par référence
+    cadastrale — la recherche par code_insee/section ne fonctionne pas pour
+    les arrondissements (Paris/Lyon/Marseille).
+    """
+    _geom = json.dumps({"type": "Point", "coordinates": [lon, lat]})
+    data = _get(
+        "https://apicarto.ign.fr/api/cadastre/parcelle",
+        params={"geom": _geom, "_limit": 1},
+        timeout=10,
+    )
+    if not data:
+        return None
+    feats = data.get("features", [])
+    if not feats:
+        return None
+    geom = feats[0].get("geometry")
+    props = feats[0].get("properties", {})
+    if not geom:
+        return None
+    return json.dumps({
+        "geometry": geom,
+        "section": props.get("section", ""),
+        "numero": props.get("numero", ""),
+        "contenance": props.get("contenance"),
+    })
