@@ -965,7 +965,10 @@ def score_comparables(df: pd.DataFrame, surface_ref: float | None = None,
     out = df.copy()
 
     # ── distance ─────────────────────────────────────────────────────────
-    _d = out["distance_m"] if "distance_m" in out.columns else pd.Series(dtype=float)
+    # La colonne produite par get_dvf_transactions s'appelle "Distance (m)" ;
+    # on accepte aussi "distance_m" au cas où la source varie.
+    _dcol = next((c for c in ("Distance (m)", "distance_m") if c in out.columns), None)
+    _d = out[_dcol] if _dcol else pd.Series(dtype=float)
     if not _d.empty and _d.notna().any() and radius_max_m > 0:
         s_dist = (1 - (_d.astype(float) / radius_max_m)).clip(0, 1) * 100
     else:
@@ -3072,6 +3075,34 @@ with tab_dvf:
                 return " · ".join(parts) if parts else "—"
             dvf_df["Commentaire"] = dvf_df.apply(_dvf_comment, axis=1)
 
+            # ── Nettoyage des valeurs aberrantes (AVANT toute statistique) ──
+            # Méthode interquartile : écarte ce qui sort de
+            # [Q1 − 1,5×IQR ; Q3 + 1,5×IQR]. Appliqué d'office : un prix/m² à 0 €
+            # ou à 566 000 €/m² n'est pas un comparable, c'est un artefact
+            # (vente entre parties liées, lot mal renseigné, démembrement…).
+            # Doit précéder les métriques, sinon min/max affichent les artefacts.
+            _n_brut = len(dvf_df)
+            _n_outliers = 0
+            _bornes = None
+            if "Prix/m²" in dvf_df.columns and len(dvf_df) >= 8:
+                _v0 = dvf_df["Prix/m²"].dropna()
+                if len(_v0) >= 8:
+                    _q1, _q3 = _v0.quantile(0.25), _v0.quantile(0.75)
+                    _iqr = _q3 - _q1
+                    _lo, _hi = max(_q1 - 1.5 * _iqr, 0), _q3 + 1.5 * _iqr
+                    # on écarte aussi les prix/m² nuls ou négatifs (non exploitables)
+                    _mask_ok = dvf_df["Prix/m²"].isna() | (
+                        dvf_df["Prix/m²"].between(_lo, _hi) & (dvf_df["Prix/m²"] > 0)
+                    )
+                    _n_outliers = int((~_mask_ok).sum())
+                    dvf_df = dvf_df[_mask_ok]
+                    _bornes = (_lo, _hi)
+            if _n_outliers and _bornes:
+                st.caption(f"🧹 {_n_outliers} valeur(s) aberrante(s) écartée(s) "
+                           f"(hors [{_bornes[0]:,.0f} ; {_bornes[1]:,.0f}] €/m²) · "
+                           f"{_n_brut} → {len(dvf_df)} transaction(s) exploitables"
+                           .replace(",", "\u202f"))
+
             # Métriques de synthèse — calculées ici (pas via apis.dvf_summary)
             # pour que le prix min/max/médian s'affiche sans dépendre du module
             # apis (rechargement direct au F5).
@@ -3096,23 +3127,6 @@ with tab_dvf:
             # ── Sélection des comparables les plus pertinents ──────────────
             st.subheader("🎯 Comparables les plus pertinents")
 
-            # IQR intégré d'office : une valeur hors de [Q1-1.5×IQR ; Q3+1.5×IQR]
-            # n'est pas un comparable exploitable (vente entre parties liées, lot
-            # mal renseigné…). Pas d'option : ce serait un piège méthodologique.
-            _n_avant = len(dvf_df)
-            _n_outliers = 0
-            _bornes = None
-            if "Prix/m²" in dvf_df.columns and len(dvf_df) >= 8:
-                _v = dvf_df["Prix/m²"].dropna()
-                if len(_v) >= 8:
-                    _q1, _q3 = _v.quantile(0.25), _v.quantile(0.75)
-                    _iqr = _q3 - _q1
-                    _lo, _hi = _q1 - 1.5 * _iqr, _q3 + 1.5 * _iqr
-                    _mask_ok = dvf_df["Prix/m²"].isna() | dvf_df["Prix/m²"].between(_lo, _hi)
-                    _n_outliers = int((~_mask_ok).sum())
-                    dvf_df = dvf_df[_mask_ok]
-                    _bornes = (_lo, _hi)
-
             # Réglages sur une seule ligne alignée
             _f1, _f2, _f3, _f4, _f5 = st.columns([1.2, 1, 1, 1, 1])
             with _f1:
@@ -3130,18 +3144,12 @@ with tab_dvf:
                 _n_max = st.slider("Nb max", 1, 100, 20, 1, key="n_max_comp",
                                    disabled=_all_tx)
 
+            _n_avant_surf = len(dvf_df)
             if _surf_min > 0 and "Surface (m²)" in dvf_df.columns:
                 dvf_df = dvf_df[dvf_df["Surface (m²)"].fillna(0) >= _surf_min]
-
-            # Une seule ligne de synthèse des filtres appliqués
-            _msg = []
-            if _n_outliers and _bornes:
-                _msg.append(f"{_n_outliers} valeur(s) aberrante(s) écartée(s) "
-                            f"(hors [{_bornes[0]:,.0f} ; {_bornes[1]:,.0f}] €/m²)".replace(",", "\u202f"))
-            if len(dvf_df) < _n_avant:
-                _msg.append(f"{_n_avant} → {len(dvf_df)} transaction(s)")
-            if _msg:
-                st.caption("🧹 " + " · ".join(_msg))
+                if len(dvf_df) < _n_avant_surf:
+                    st.caption(f"📐 Surface ≥ {_surf_min} m² : "
+                               f"{_n_avant_surf} → {len(dvf_df)} transaction(s).")
 
             if dvf_df.empty:
                 st.warning("Aucune transaction ne passe les filtres — abaisse la "
