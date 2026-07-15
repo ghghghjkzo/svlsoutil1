@@ -33,6 +33,19 @@ import apis
 import auth
 import dossiers
 
+
+
+def plur(n, singulier: str, pluriel: str | None = None) -> str:
+    """Accorde un mot selon le nombre : plur(1,'transaction') → '1 transaction',
+    plur(3,'transaction') → '3 transactions'. Évite les « (s) » inélégants.
+    Pour un pluriel irrégulier, passer la forme explicitement."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 0
+    mot = singulier if abs(n) <= 1 else (pluriel or singulier + "s")
+    return f"{n:,}".replace(",", "\u202f") + f" {mot}"
+
 st.set_page_config(page_title="Valo — Valorisation", page_icon="🏢", layout="wide")
 
 # ── Interrupteur d'authentification ───────────────────────────────────────
@@ -1471,7 +1484,7 @@ if st.session_state.active_dossier_id is None:
             st.markdown('<div class="valo-fade">', unsafe_allow_html=True)
             for d in existing:
                 with st.container(border=True):
-                    _c1, _c2, _c3 = st.columns([4, 1, 0.6])
+                    _c1, _c2, _c3 = st.columns([5, 1.6, 1.6])
                     with _c1:
                         st.markdown(f"**{d.get('nom_client', 'Sans nom')}**")
                         _bits = [d.get("adresse") or "—", d.get("type_bien", "—"),
@@ -1487,9 +1500,29 @@ if st.session_state.active_dossier_id is None:
                             st.session_state.pop("mode_radio_key", None)
                             st.rerun()
                     with _c3:
-                        if st.button("🗑️", key=f"del_{d['id']}", use_container_width=True):
-                            dossiers.delete_dossier(d["id"])
-                            st.rerun()
+                        _dk = f"confirm_del_{d['id']}"
+                        if st.session_state.get(_dk):
+                            # Suppression définitive : on demande confirmation,
+                            # un dossier perdu n'est pas récupérable.
+                            st.caption("**Supprimer ?**")
+                            _y, _n = st.columns(2)
+                            with _y:
+                                if st.button("Oui", key=f"yes_{d['id']}",
+                                             use_container_width=True):
+                                    dossiers.delete_dossier(d["id"])
+                                    st.session_state.pop(_dk, None)
+                                    st.rerun()
+                            with _n:
+                                if st.button("Non", key=f"no_{d['id']}",
+                                             use_container_width=True):
+                                    st.session_state.pop(_dk, None)
+                                    st.rerun()
+                        else:
+                            if st.button("🗑️", key=f"del_{d['id']}",
+                                         use_container_width=True,
+                                         help="Supprimer ce dossier"):
+                                st.session_state[_dk] = True
+                                st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
@@ -1672,9 +1705,23 @@ with st.sidebar:
         manual_cp = st.text_input("Code postal", value="", placeholder="ex. 44000")
 
     if address:
-        target = geocode(address)
+        # On combine adresse + CP + commune : géocoder l'adresse SEULE laissait
+        # la BAN choisir n'importe quelle ville (« 3 rue de la Paix » existe
+        # partout en France) — la commune saisie était purement ignorée.
+        _parts = [address.strip(), manual_cp.strip(), manual_commune.strip()]
+        _query = " ".join(p for p in _parts if p)
+        target = geocode(_query)
         if not target:
-            st.error("Adresse introuvable ou réseau indisponible. Vérifie l'orthographe / ajoute la commune.")
+            st.error("Adresse introuvable ou réseau indisponible. "
+                     "Vérifie l'orthographe / ajoute la commune.")
+        elif manual_commune.strip():
+            # Contrôle : la BAN a-t-elle bien retenu la commune demandée ?
+            _got = (target.get("city") or "").strip().lower()
+            _want = manual_commune.strip().lower()
+            if _got and _want and _want not in _got and _got not in _want:
+                st.warning(f"⚠️ Adresse géocodée à **{target.get('city')}** alors que "
+                           f"tu as saisi **{manual_commune.strip()}**. "
+                           f"Précise l'adresse (numéro + voie) ou vérifie le code postal.")
     elif manual_commune.strip():
         target = geocode(f"{manual_commune.strip()} {manual_cp.strip()}".strip())
         if target:
@@ -2402,18 +2449,6 @@ def _valid_coord(v) -> bool:
         return v is not None and math.isfinite(float(v))
     except (TypeError, ValueError):
         return False
-
-
-def plur(n, singulier: str, pluriel: str | None = None) -> str:
-    """Accorde un mot selon le nombre : plur(1,'transaction') → '1 transaction',
-    plur(3,'transaction') → '3 transactions'. Évite les « (s) » inélégants.
-    Pour un pluriel irrégulier, passer la forme explicitement."""
-    try:
-        n = int(n)
-    except (TypeError, ValueError):
-        n = 0
-    mot = singulier if abs(n) <= 1 else (pluriel or singulier + "s")
-    return f"{n:,}".replace(",", "\u202f") + f" {mot}"
 
 
 def _safe_int(v, default=None):
