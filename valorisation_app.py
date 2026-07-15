@@ -1361,6 +1361,7 @@ if "dossier_loaded" not in st.session_state:
         st.session_state.active_dossier_meta = full
         dossiers.restore_session_state(full.get("data") or {}, st.session_state)
     st.session_state.dossier_loaded = True
+    st.session_state.portal_dismissed = False  # nouveau dossier chargé → montrer le portail s'il a des données
     # Fix : le widget radio "mode" garde en mémoire la dernière valeur choisie
     # pour toute la session navigateur — sans ce reset explicite, changer de
     # dossier n'actualise pas le mode et force à relancer une recherche à vide.
@@ -1368,6 +1369,75 @@ if "dossier_loaded" not in st.session_state:
         "Rechercher en direct (expérimental)"
         if st.session_state.get("live_results") else "Charger un fichier Excel"
     )
+
+# ── Portail d'accueil : écran plein à l'ouverture d'un dossier QUI CONTIENT
+# déjà des données (DVF ou offres sauvegardées). Propose d'exporter directement
+# ou de lancer une nouvelle recherche. Un dossier vide saute cette étape.
+_has_offres = bool(st.session_state.get("live_results"))
+_dvf_saved = st.session_state.get("dvf_results")
+_has_dvf = isinstance(_dvf_saved, pd.DataFrame) and not _dvf_saved.empty
+if "portal_dismissed" not in st.session_state:
+    st.session_state.portal_dismissed = False
+
+if (_has_offres or _has_dvf) and not st.session_state.portal_dismissed:
+    _pmeta = st.session_state.get("active_dossier_meta", {})
+    st.markdown(
+        f"<div style='max-width:640px;margin:8vh auto 0;text-align:center'>"
+        f"<div style='color:#8A93A3;font-weight:600;text-transform:uppercase;"
+        f"font-size:11px;letter-spacing:0.05em'>Dossier</div>"
+        f"<h1 style='color:#14161F;margin:6px 0 2px'>{_pmeta.get('nom_client','Sans nom')}</h1>"
+        f"<div style='color:#5A6372;font-size:15px'>{_pmeta.get('adresse','—') or '—'}</div>"
+        f"<div style='margin-top:8px;color:#008493;font-size:13px'>"
+        f"{'📊 ' + str(len(st.session_state['live_results'])) + ' offre(s) · ' if _has_offres else ''}"
+        f"{'🏛️ ' + str(len(_dvf_saved)) + ' transaction(s) DVF' if _has_dvf else ''}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+    _pc1, _pc2, _pc3 = st.columns(3)
+
+    # Export DVF (CSV) — dans l'ordre voulu : date, adresse, m², prix/m², commentaire
+    with _pc1:
+        if _has_dvf:
+            _dvf_cols = [c for c in ["Date", "Adresse", "Surface (m²)", "Prix/m²", "Commentaire"]
+                         if c in _dvf_saved.columns]
+            _dvf_csv = _dvf_saved[_dvf_cols].to_csv(index=False).encode("utf-8")
+            st.download_button("🏛️ Export DVF", _dvf_csv,
+                               file_name="dvf_transactions.csv", mime="text/csv",
+                               use_container_width=True)
+        else:
+            st.button("🏛️ Export DVF", disabled=True, use_container_width=True,
+                      help="Aucune transaction DVF dans ce dossier.")
+
+    # Export Offres (Excel) — réutilise build_export_table/export_to_excel_bytes
+    with _pc2:
+        if _has_offres:
+            try:
+                _dfo = pd.DataFrame(st.session_state["live_results"])
+                _nv = _dfo.get("Prix_vente_eur_m2", pd.Series(dtype=float)).apply(to_num).notna().sum()
+                _nl = _dfo.get("Loyer_facial_eur_m2_an", pd.Series(dtype=float)).apply(to_num).notna().sum()
+                _opi = "Vente" if _nv > _nl else "Location"
+                _xo = export_to_excel_bytes(build_export_table(_dfo, operation=_opi),
+                                            title=f"Offres — {_pmeta.get('nom_client','Dossier')}",
+                                            operation=_opi)
+                st.download_button("📊 Export Offres", _xo,
+                                   file_name="offres.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True)
+            except Exception as _pe:
+                st.button("📊 Export Offres", disabled=True, use_container_width=True,
+                          help=f"Export indisponible : {_pe}")
+        else:
+            st.button("📊 Export Offres", disabled=True, use_container_width=True,
+                      help="Aucune offre dans ce dossier.")
+
+    # Nouvelle recherche — ferme le portail et entre dans l'app normale
+    with _pc3:
+        if st.button("🔍 Nouvelle recherche", use_container_width=True, type="primary"):
+            st.session_state.portal_dismissed = True
+            st.rerun()
+
+    st.stop()  # tant que le portail est affiché, on n'affiche pas le reste
 
 # ── Bandeau dossier actif (en haut, au-dessus de tout le reste) ────────────
 _meta = st.session_state.get("active_dossier_meta", {})
@@ -1424,6 +1494,7 @@ with _bcol4:
     if st.button("📂 Changer", use_container_width=True):
         st.session_state.active_dossier_id = None
         st.session_state.dossier_loaded = False
+        st.session_state.portal_dismissed = False  # réafficher le portail au prochain dossier
         st.session_state.pop("mode_radio_key", None)  # resynchronise le mode au prochain dossier
         st.rerun()
 
