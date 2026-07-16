@@ -3412,7 +3412,26 @@ with tab_dvf:
             # restreinte (≤30) : une requête IGN par transaction, donc impossible
             # sur de gros volumes. Au-delà, seuls les points sont affichés.
             _show_parcelles = len(dvf_df) <= 30
-            dvf_map = folium.Map(location=[t_lat, t_lon], zoom_start=14, tiles=None)
+            # Centre de la carte : normalement l'actif cible. Mais si le
+            # géocodage a envoyé la cible à des kilomètres des transactions
+            # (adresse ambiguë type « rue de la Paix » sans commune), on
+            # recadre sur les transactions — sinon la carte s'ouvre sur une
+            # zone vide et l'utilisateur croit qu'il n'y a aucun point.
+            _map_lat, _map_lon = t_lat, t_lon
+            _far = False
+            if "_lat" in dvf_df.columns and dvf_df["_lat"].notna().any():
+                _c_lat = float(dvf_df["_lat"].median())
+                _c_lon = float(dvf_df["_lon"].median())
+                if haversine_m(t_lat, t_lon, _c_lat, _c_lon) > 30000:  # >30 km
+                    _map_lat, _map_lon, _far = _c_lat, _c_lon, True
+            if _far:
+                st.warning(
+                    "⚠️ L'adresse saisie a été géocodée à **plus de 30 km** des "
+                    "transactions trouvées — la commune indiquée ne correspond "
+                    "probablement pas à l'adresse. Vérifie l'adresse, la commune "
+                    "et le code postal. La carte est recadrée sur les transactions."
+                )
+            dvf_map = folium.Map(location=[_map_lat, _map_lon], zoom_start=14, tiles=None)
             folium.TileLayer(
                 "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
                 attr="Esri", name="🛰️ Satellite", overlay=False, control=True
@@ -3426,20 +3445,16 @@ with tab_dvf:
             folium.Marker([t_lat, t_lon], tooltip="🏢 Actif",
                           icon=folium.Icon(color="red", icon="home", prefix="fa")).add_to(dvf_map)
 
-            # Cible d'ajout des marqueurs : au-delà de 200 points on passe par un
-            # MarkerCluster (sinon rendu très lent). En dessous, on ajoute
-            # directement à la carte — plus fiable, car le JS du cluster ne se
-            # rend pas toujours dans un components.html statique (points invisibles).
-            _n_valid = sum(1 for _, rw in dvf_df.iterrows()
-                           if _valid_coord(rw.get("_lat")) and _valid_coord(rw.get("_lon")))
-            if _n_valid > 200:
-                from folium.plugins import MarkerCluster
-                _marker_target = MarkerCluster(name="Transactions").add_to(dvf_map)
-            else:
-                _marker_target = dvf_map
+            # Marqueurs ajoutés directement à la carte, sans MarkerCluster :
+            # le JS du plugin ne s'exécute pas dans components.html, donc AUCUN
+            # point n'apparaissait au-delà du seuil de bascule. Les CircleMarker
+            # directs se rendent de façon fiable quel que soit le volume — c'est
+            # le comportement d'origine, avant que le cluster ne soit introduit.
+            _marker_target = dvf_map
+            _dvf_map_df = dvf_df
 
             _n_markers = 0
-            for _, row in dvf_df.iterrows():
+            for _, row in _dvf_map_df.iterrows():
                 if not _valid_coord(row.get("_lat")) or not _valid_coord(row.get("_lon")):
                     continue
                 _n_markers += 1
@@ -3502,9 +3517,8 @@ with tab_dvf:
 
             try:
                 _map_html = dvf_map._repr_html_()
-                st.caption(f"🔍 {_n_markers} marqueur(s) ajouté(s) · "
-                           f"HTML {len(_map_html)//1000} Ko · "
-                           f"{'cluster' if _n_valid > 200 else 'direct'}")
+                st.caption(f"🔍 {plur(_n_markers, 'marqueur ajouté', 'marqueurs ajoutés')} · "
+                           f"HTML {len(_map_html)//1000} Ko")
                 components.html(_map_html, height=480, scrolling=False)
             except Exception as _map_err:
                 # Rendre l'échec visible plutôt que d'afficher une zone vide :
